@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-3.0-only
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+.env
+.env.*
+*key*.txt
+*token*.txt
+law_oc.txt
+_kapa_data/
+*.parquet
+*.duckdb
+*.sqlite3
+!tests/fixtures/**
