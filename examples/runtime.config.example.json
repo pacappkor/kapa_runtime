@@ -1,0 +1,13 @@
+{
+  "_license": "SPDX-License-Identifier: GPL-3.0-only",
+  "workspace": "../..",
+  "data_root": "../../_kapa_data",
+  "credential_files": {
+    "data_go_kr": "../../data_gov_key.txt",
+    "hugging_face": "../../hf_token.txt",
+    "rone": "../../rone_key.txt",
+    "vworld": "../../vworld_key.txt"
+  },
+  "hf_namespace": "realsolution",
+  "hf_repos": {"market": "kapa-market-data"}
+}

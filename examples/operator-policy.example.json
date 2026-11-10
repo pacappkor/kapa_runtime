@@ -1,0 +1,30 @@
+{
+  "_license": "SPDX-License-Identifier: GPL-3.0-only",
+  "services": {
+    "molit-apartment-sale": {
+      "max_requests": 100,
+      "terms_reviewed": false,
+      "terms_basis": "검토 후 실제 이용조건·출처 URL·reviewed_at 기록",
+      "daily_limit": 10000,
+      "quota_source": "user-reported-2026-11-10"
+    },
+    "molit-apartment-rent": {
+      "max_requests": 100,
+      "terms_reviewed": false,
+      "terms_basis": "검토 후 실제 이용조건·출처 URL·reviewed_at 기록",
+      "daily_limit": 10000,
+      "quota_source": "user-reported-2026-11-10"
+    }
+  },
+  "fixture_evidence": {
+    "github_revision": "REPLACE_WITH_CLEAN_TESTED_40_HEX_HEAD",
+    "passed": false
+  },
+  "provider_quotas": {
+    "vworld": {
+      "daily_limit": 40000,
+      "quota_source": "user-reported-2026-11-10",
+      "implemented": false
+    }
+  }
+}

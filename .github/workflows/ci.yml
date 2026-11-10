@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: GPL-3.0-only
+name: Synthetic tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python 3.12 / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Check out runtime only
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Set up pinned uv
+        # Official uv GitHub Actions integration; setup-uv v9.0.0.
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: '0.11.14'
+          enable-cache: false
+      - name: Install locked package and test dependencies
+        run: uv sync --locked --extra test --python 3.12
+      - name: Run synthetic fixture tests
+        run: uv run --locked --extra test --python 3.12 python -I -B -m pytest -p no:cacheprovider

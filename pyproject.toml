@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: GPL-3.0-only
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kapa-runtime"
+version = "0.1.0.dev0"
+description = "Private KAPA public-data collection, normalization, private release and workflow-state runtime"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
+classifiers = ["Private :: Do Not Upload"]
+dependencies = [
+  "httpx>=0.28,<1",
+  "defusedxml>=0.7,<1",
+  "pyarrow>=18",
+  "tzdata>=2024.1",
+  "duckdb>=1.1,<2",
+  "huggingface_hub>=0.26,<2",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+kapa-runtime = "kapa_runtime.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+kapa_runtime = ["registry/*.json", "schemas/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
