@@ -110,7 +110,7 @@ class StateStore:
     def _migrate(self):
         con = self._connection
         version = con.execute("PRAGMA user_version").fetchone()[0]
-        if version > 3:
+        if version > 4:
             raise ValueError("unsupported state schema version")
         if version == 0:
             con.executescript("""
@@ -154,6 +154,28 @@ class StateStore:
                 COMMIT;
             """)
 
+    def migrate_jobs(self):
+        """Opt-in v4; a single StateStore lock also owns the job executor."""
+        self._migrate_snapshots()
+        if self._connection.execute("PRAGMA user_version").fetchone()[0] == 3:
+            self._connection.executescript("""
+                BEGIN IMMEDIATE;
+                CREATE TABLE collection_jobs (job_id TEXT PRIMARY KEY,
+                    state TEXT NOT NULL, data TEXT NOT NULL);
+                CREATE TABLE work_items (job_id TEXT NOT NULL REFERENCES collection_jobs(job_id),
+                    lawd_code TEXT NOT NULL, deal_ymd TEXT NOT NULL, state TEXT NOT NULL,
+                    PRIMARY KEY(job_id, lawd_code, deal_ymd));
+                CREATE TABLE attempts (attempt_id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL, lawd_code TEXT NOT NULL, deal_ymd TEXT NOT NULL,
+                    service_id TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(run_id),
+                    observation_id TEXT REFERENCES observations(observation_id),
+                    state TEXT NOT NULL, data TEXT NOT NULL,
+                    FOREIGN KEY(job_id, lawd_code, deal_ymd)
+                        REFERENCES work_items(job_id, lawd_code, deal_ymd));
+                PRAGMA user_version=4;
+                COMMIT;
+            """)
+
     def record_snapshot(self, manifest):
         from ..releases.manifest import validate_manifest
         m = validate_manifest(manifest)
@@ -161,6 +183,21 @@ class StateStore:
             raise ValueError('resolved inline snapshot required')
         self._migrate_snapshots()
         con = self._connection
+        existing = con.execute('SELECT parent_release_id,parent_digest FROM snapshot_parents WHERE release_id=?',
+                               (m['release_id'],)).fetchone()
+        if existing is not None:
+            parent = m['parent_snapshot']
+            members = [dict(row) for row in con.execute(
+                'SELECT lawd_code,deal_ymd FROM batch_members WHERE release_id=? ORDER BY lawd_code,deal_ymd',
+                (m['release_id'],))]
+            partitions = [json.loads(row[0]) for row in con.execute(
+                'SELECT evidence FROM partition_selections WHERE release_id=? ORDER BY lawd_code,deal_ymd,service_id',
+                (m['release_id'],))]
+            if (tuple(existing) != (parent['release_id'], parent['digest'])
+                    or members != m['batch_scope']['declared_pairs']
+                    or partitions != m['selected_partitions']):
+                raise ValueError('snapshot evidence conflict')
+            return
         con.execute('BEGIN IMMEDIATE')
         try:
             parent = m['parent_snapshot']
