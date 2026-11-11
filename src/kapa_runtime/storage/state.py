@@ -176,11 +176,13 @@ class StateStore:
                 COMMIT;
             """)
 
-    def record_snapshot(self, manifest):
+    def record_snapshot(self, manifest, loader=None):
         from ..releases.manifest import validate_manifest
+        from ..releases.manifest_v2 import resolve_snapshot
         m = validate_manifest(manifest)
-        if m['schema_version'] != 'kapa-runtime-release/2' or m['coverage_shards']:
-            raise ValueError('resolved inline snapshot required')
+        if m['schema_version'] != 'kapa-runtime-release/2':
+            raise ValueError('v2 snapshot required')
+        m = resolve_snapshot(m, loader)
         self._migrate_snapshots()
         con = self._connection
         existing = con.execute('SELECT parent_release_id,parent_digest FROM snapshot_parents WHERE release_id=?',

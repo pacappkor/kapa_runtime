@@ -105,13 +105,18 @@ def _plan(settings, store, resolved, policy, clock):
     registry = ServiceRegistry.load()
     for service in SERVICES:
         limit = policy.get("services", {}).get(service, {}).get("daily_limit", 9000)
-        p._require(type(limit) is int and limit > 0, "invalid_daily_quota")
+        p._require(type(limit) is int and limit >= policy['services'][service]['max_requests'],
+                   "invalid_daily_quota")
         limits.append(min(9000, limit, registry.get(service).quota["daily_limit"]))
     budget = Budget(sale_requests=max(0, limits[0] - store.reserved_requests(SERVICES[0], day)),
                     rent_requests=max(0, limits[1] - store.reserved_requests(SERVICES[1], day)),
                     requests_per_pair=min(budgets))
-    plan = plan_day(codes, today=datetime.fromisoformat(day).date(),
-                    coverage=_coverage(resolved, store), budget=budget)
+    coverage = _coverage(resolved, store)
+    plan = plan_day(codes, today=datetime.fromisoformat(day).date(), coverage=coverage, budget=budget)
+    if not plan.items and budget.pair_capacity == 0:
+        # Persist real work, not an empty terminal job, so tomorrow can resume it.
+        plan = plan_day(codes, today=datetime.fromisoformat(day).date(), coverage=coverage,
+                        budget=Budget(requests_per_pair=budget.requests_per_pair, batch_cap=1))
     return plan, budget, reference
 
 
@@ -272,6 +277,59 @@ def _terms(policy):
     return terms
 
 
+def _preflight(parent, resolved, items, policy):
+    """Conservative metadata bounds before reserving quota or calling an adapter.
+
+    Generated partitions have one file and UUID identifiers; 16 KiB per pair
+    includes both partitions, coverage and predecessor evidence. Existing blocks
+    are split if necessary, so root growth is bounded by explicit references.
+    """
+    from .releases import manifest_v2 as v2
+    from .releases.manifest import _json
+    pairs = {(p['lawd_code'], p['deal_ymd']) for p in items}
+    known = {(p['lawd_code'], p['deal_ymd']) for p in
+             resolved['coverage']['declared'] + resolved['selected_partitions']}
+    count = (len(known | pairs) * 8)
+    # Worst case: every touched block splits into pair-sized shards. Untouched
+    # refs stay fixed. This intentionally refuses near-limit uncertain jobs.
+    touched_entries = 0
+    for part in resolved['selected_partitions']:
+        if (part['lawd_code'], part['deal_ymd']) in pairs:
+            touched_entries += len(_json(part).encode())
+    # Bound splitting by both entry count and serialized bytes. A binary split
+    # can leave two half-full blocks; retain that headroom in the estimate.
+    inherited_bytes = sum(len(_json(part).encode()) + 1024
+                          for part in resolved['selected_partitions'])
+    refs = (len(parent.get('coverage_shards', [])) + len(pairs) * 2 + 1
+            + 2 * ((count + v2.MAX_SHARD_ENTRIES - 1) // v2.MAX_SHARD_ENTRIES)
+            + 2 * ((inherited_bytes + v2.MAX_METADATA_BYTES - 1) // v2.MAX_METADATA_BYTES))
+    root_bytes = len(_json({**parent, 'selected_partitions': [], 'coverage': {}}).encode())
+    pair_bytes = {}
+    for part in resolved['selected_partitions']:
+        identity = (part['lawd_code'], part['deal_ymd'])
+        pair_bytes[identity] = pair_bytes.get(identity, 0) + len(_json(part).encode()) + 2048
+    p._require(all(size + 16384 <= v2.MAX_METADATA_BYTES for size in pair_bytes.values()),
+               'manifest_capacity_exceeded')
+    producers = {part['producer_release_id'] for part in resolved['selected_partitions']}
+    root_bytes += len(_json(policy).encode()) + refs * 300 + len(producers) * 300 + 65536
+    p._require(count <= v2.MAX_SNAPSHOT_ENTRIES and refs <= v2.MAX_SHARDS
+               and root_bytes <= v2.MAX_METADATA_BYTES
+               and (not pairs or v2.MAX_METADATA_BYTES >= 16384)
+               and touched_entries <= v2.MAX_METADATA_BYTES * max(1, len(pairs)),
+               'manifest_capacity_exceeded')
+
+
+def _new_job_id(settings, store, parent, job):
+    collision = job == parent['release_id']
+    for table in ('releases', 'snapshot_parents', 'batch_members', 'partition_selections', 'public_promotions'):
+        collision |= store._connection.execute(
+            f'SELECT 1 FROM {table} WHERE release_id=? LIMIT 1', (job,)).fetchone() is not None
+    for directory, name in ((settings.manifests_dir, job + '.json'),
+                            (settings.snapshots_dir, job), (settings.staging_dir, job)):
+        collision |= (directory / name).exists()
+    p._require(not collision, 'job_id_collision')
+
+
 def collect_batch(settings, *, job_id=None, dry_run=False, client=None,
                   clock=lambda: datetime.now(ZoneInfo("Asia/Seoul"))):
     if dry_run:
@@ -309,10 +367,12 @@ def collect_batch(settings, *, job_id=None, dry_run=False, client=None,
                 p._require(manifest.get("quality", {}).get("plan_digest") == data["plan_digest"]
                            and manifest.get("quality", {}).get("policy_digest") == data["policy_digest"],
                            "verification_failed")
-                store.record_snapshot(manifest)
+                store.record_snapshot(manifest, loader=lambda name: _load(settings.snapshots_dir / job, name))
                 p._verify_local(settings.snapshots_dir / job, manifest)
                 return {"state": "validated", "pairs": len(manifest["batch_scope"]["declared_pairs"])}
         else:
+            _new_job_id(settings, store, parent, job)
+            _preflight(parent, resolved, [asdict(item) for item in daily.items], policy)
             # Do not strand a completed unpublished batch by starting another job.
             p._require(not con.execute("SELECT 1 FROM collection_jobs WHERE state IN ('running','paused','built')").fetchone(),
                        "resume_existing_job_required")
@@ -327,6 +387,7 @@ def collect_batch(settings, *, job_id=None, dry_run=False, client=None,
             except BaseException:
                 con.execute("ROLLBACK")
                 raise
+        _preflight(parent, resolved, data['plan']['items'], policy)
         amount = data["requests_per_attempt"]
         try:
             registry = ServiceRegistry.load()
@@ -431,12 +492,18 @@ def _freeze(settings, store, job, data, parent, resolved, parent_root, secrets, 
     removed = {event["evidence"].get("removed_path") for row in store.list_releases()
                for event in row["guard_evidence"]
                if event["evidence"].get("reason") == "retained_partition_removed"}
+    shard_payloads = {}
     manifest = build_snapshot(store, template, parent, parts, active_path=settings.active_manifest,
-                              origins=origins, loader=load_origin, tombstones=removed, enabled=True)
+                              origins=origins, loader=load_origin, tombstones=removed,
+                              shard_payloads=shard_payloads, enabled=True)
     scan_secret_payload(json.dumps(manifest, default=str).encode(), "release.json", secrets)
+    for name, payload in shard_payloads.items():
+        scan_secret_payload(payload, name, secrets)
     new_paths = {f["path"] for part in parts for f in part["files"]}
     destination = settings.snapshots_dir / job
     def load(name):
+        if name in shard_payloads:
+            return shard_payloads[name]
         return _load(root if name in new_paths else parent_root, name)
     if destination.exists():
         p._verify_local(destination, manifest)

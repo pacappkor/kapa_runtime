@@ -17,6 +17,7 @@ from kapa_runtime.storage.parquet import write_partition
 from kapa_runtime.storage.state import StateStore
 from test_manifest_v2 import root, partitions
 
+REAL_PLAN = a._plan
 NOW = datetime.fromisoformat('2026-11-12T12:00:00+09:00')
 ZERO = b'<response><header><resultCode>000</resultCode></header><body><items/><totalCount>0</totalCount><pageNo>1</pageNo><numOfRows>1000</numOfRows></body></response>'
 
@@ -357,3 +358,110 @@ def test_unknown_provider_field_stops_as_schema_drift(setup):
         result = a.collect_batch(setup, job_id='drift', client=http, clock=lambda: NOW)
     assert result['state'] == 'blocked'
     assert result['error_code'] == 'schema_blocked'
+
+
+@pytest.mark.parametrize('where', ['active', 'release', 'snapshot_ledger', 'manifest', 'snapshot', 'staging'])
+def test_job_collision_before_requests(setup, where):
+    job = 'A' if where == 'active' else 'occupied'
+    if where in ('manifest', 'snapshot', 'staging'):
+        directory = {'manifest': setup.manifests_dir, 'snapshot': setup.snapshots_dir,
+                     'staging': setup.staging_dir}[where]
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / (job + '.json' if where == 'manifest' else job)).touch()
+    with StateStore(setup.state_db) as store:
+        store.migrate_jobs()
+        if where == 'release':
+            store._connection.execute('INSERT INTO releases VALUES (?,?,?,?)',
+                                      (job, 'failed', '[]', NOW.isoformat()))
+        if where == 'snapshot_ledger':
+            store._connection.execute('INSERT INTO snapshot_parents VALUES (?,?,?)', (job, 'A', 'a' * 64))
+    with client(lambda _: pytest.fail('adapter called')) as http:
+        with pytest.raises(a.p.PipelineError, match='job_id_collision'):
+            a.collect_batch(setup, job_id=job, client=http, clock=lambda: NOW)
+    with StateStore(setup.state_db) as store:
+        assert store._connection.execute('SELECT count(*) FROM collection_jobs').fetchone()[0] == 0
+        assert store._connection.execute('SELECT count(*) FROM runs').fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('limit,value', [('MAX_SNAPSHOT_ENTRIES', 8), ('MAX_METADATA_BYTES', 4096),
+                                          ('MAX_SHARDS', 1)])
+def test_manifest_capacity_before_adapter(setup, monkeypatch, limit, value):
+    from kapa_runtime.releases import manifest_v2 as v2
+    monkeypatch.setattr(v2, limit, value)
+    calls = []
+    with client(lambda _: (calls.append(1), httpx.Response(200, content=ZERO))[1]) as http:
+        with pytest.raises(a.p.PipelineError, match='manifest_capacity_exceeded'):
+            a.collect_batch(setup, job_id='capacity', client=http, clock=lambda: NOW)
+    assert calls == []
+    with StateStore(setup.state_db) as store:
+        assert store._connection.execute('SELECT count(*) FROM runs').fetchone()[0] == 0
+        assert store._connection.execute('SELECT count(*) FROM collection_jobs').fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('service', a.SERVICES)
+def test_daily_limit_below_attempt_rejected(setup, service):
+    path = setup.data_root / 'operator-policy.json'
+    policy = json.loads(path.read_text())
+    policy['services'][service]['daily_limit'] = 2
+    path.write_text(json.dumps(policy))
+    with client(lambda _: pytest.fail('adapter called')) as http:
+        with pytest.raises(a.p.PipelineError, match='invalid_daily_quota'):
+            a.collect_batch(setup, job_id='limit', client=http, clock=lambda: NOW)
+
+
+@pytest.mark.parametrize('service', a.SERVICES)
+def test_zero_capacity_pauses_and_resumes(setup, monkeypatch, service):
+    # Restore the real planner (the fixture substitutes a fixed tiny plan).
+    monkeypatch.setattr(a, '_plan', REAL_PLAN)
+    monkeypatch.setattr(a, 'lawd_reference', lambda *_: (['11110'], 'test-reference'))
+    with StateStore(setup.state_db) as store:
+        store.record_run('exhausted', service_id=service, quota_day='2026-11-12', reserved_requests=9000)
+    with client(lambda _: pytest.fail('adapter called')) as http:
+        result = a.collect_batch(setup, job_id='paused', client=http, clock=lambda: NOW)
+    assert result == {'state': 'paused', 'error_code': 'quota_pause', 'completed_pairs': 0}
+    with client() as http:
+        result = a.collect_batch(setup, job_id='paused', client=http,
+                                 clock=lambda: datetime.fromisoformat('2026-11-13T12:00:00+09:00'))
+    assert result['state'] == 'validated', result
+
+
+def test_no_backlog_is_empty_even_without_quota(setup, monkeypatch):
+    monkeypatch.setattr(a, '_plan', REAL_PLAN)
+    monkeypatch.setattr(a, 'lawd_reference', lambda *_: ([], 'empty-reference'))
+    with StateStore(setup.state_db) as store:
+        for service in a.SERVICES:
+            store.record_run(service, service_id=service, quota_day='2026-11-12', reserved_requests=9000)
+    with client(lambda _: pytest.fail('adapter called')) as http:
+        assert a.collect_batch(setup, job_id='empty', client=http, clock=lambda: NOW) == {
+            'state': 'empty', 'pairs': 0}
+
+
+def test_sharded_parent_materializes_and_retries(setup):
+    from kapa_runtime.releases import manifest_v2 as v2
+    parent = json.loads(setup.active_manifest.read_text())
+    block = dict(schema_version='kapa-runtime-coverage/1',
+                 license='SPDX-License-Identifier: GPL-3.0-only',
+                 selected_partitions=parent['selected_partitions'], coverage=parent['coverage'])
+    payload = json.dumps(block, sort_keys=True).encode()
+    sha = hashlib.sha256(payload).hexdigest()
+    name = f'manifests/coverage/{sha}.json'
+    path = setup.snapshots_dir / 'A' / name
+    path.parent.mkdir(parents=True)
+    path.write_bytes(payload)
+    ref = dict(path=name, sha256=sha, entries=8)
+    parent.update(selected_partitions=[], coverage=v2.coverage_for_partitions([], []), coverage_shards=[ref])
+    dump_manifest(parent, setup.active_manifest)
+    dump_manifest(parent, setup.manifests_dir / 'A.json')
+    with StateStore(setup.state_db) as store:
+        evidence = [{'state': 'published', 'evidence': {
+            'commit_reread': True, 'published_manifest_sha256': manifest_digest(parent)}}]
+        store._connection.execute('UPDATE releases SET guard_evidence=? WHERE release_id=?',
+                                  (json.dumps(evidence), 'A'))
+    with client() as http:
+        result = a.collect_batch(setup, job_id='sharded', client=http, clock=lambda: NOW)
+    assert result['state'] == 'validated', result
+    manifest = json.loads((setup.manifests_dir / 'sharded.json').read_text())
+    assert ref in manifest['coverage_shards']
+    assert (setup.snapshots_dir / 'sharded' / name).read_bytes() == payload
+    with client(lambda _: pytest.fail('built job recollected')) as http:
+        assert a.collect_batch(setup, job_id='sharded', client=http, clock=lambda: NOW)['state'] == 'validated'

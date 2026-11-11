@@ -419,3 +419,48 @@ def test_retained_repair_uses_trusted_descendant(tmp_path, monkeypatch, damage, 
                 repair(name, [owners[name][2]])
         else:
             assert repair(name, [owners[name][2]]) == payloads[name]
+
+
+def test_sharded_child_reuses_untouched_blocks_and_grandchild(tmp_path):
+    import json
+    from test_manifest_v2 import keys
+    from kapa_runtime.releases import manifest_v2 as v2
+    from kapa_runtime.releases.manifest import dumps_manifest
+    a = root()
+    payloads = {}
+    refs = []
+    for region in ('11110', '26110', '41110'):
+        ps = partitions('A', region)
+        block = dict(schema_version='kapa-runtime-coverage/1', selected_partitions=ps,
+                     coverage=v2.coverage_for_partitions(ps, keys(ps)),
+                     license='SPDX-License-Identifier: GPL-3.0-only')
+        payload = json.dumps(block, sort_keys=True).encode()
+        sha = hashlib.sha256(payload).hexdigest()
+        name = f'manifests/coverage/{sha}.json'
+        payloads[name] = payload
+        refs.append(dict(path=name, sha256=sha, entries=6))
+    a.update(selected_partitions=[], coverage=v2.coverage_for_partitions([], []),
+             coverage_shards=sorted(refs, key=lambda r: r['path']))
+    a['batch_scope']['declared_pairs'] = [dict(lawd_code=c, deal_ymd='202510')
+                                         for c in ('11110', '26110', '41110')]
+    written = {}
+    b = assemble(a, 'B', partitions('B', '11110'), {'A': a},
+                 loader=payloads.__getitem__, shard_payloads=written)
+    assert len(written) == 1
+    assert all(ref in b['coverage_shards'] for ref in refs[1:])
+    assert refs[0] not in b['coverage_shards']
+    assert len(dumps_manifest(b)) < 4000
+    payloads.update(written)
+    resolved = v2.resolve_snapshot(b, payloads.__getitem__)
+    assert len(resolved['selected_partitions']) == 6
+    assert all(p['origin_digest'] == manifest_digest(a) for p in resolved['selected_partitions']
+               if p['producer_release_id'] == 'A')
+    with StateStore(tmp_path / 'ledger') as store:
+        store.record_snapshot(b, loader=payloads.__getitem__)
+        assert store._connection.execute('SELECT count(*) FROM partition_selections').fetchone()[0] == 6
+    written = {}
+    c = assemble(b, 'C', partitions('C', '26110'), {'A': a, 'B': b},
+                 loader=payloads.__getitem__, shard_payloads=written)
+    assert len(written) == 1
+    payloads.update(written)
+    assert len(v2.resolve_snapshot(c, payloads.__getitem__)['selected_partitions']) == 6

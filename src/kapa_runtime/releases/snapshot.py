@@ -5,6 +5,10 @@ from __future__ import annotations
 import copy
 import hashlib
 import os
+import json
+
+from . import manifest_v2 as v2
+from .manifest import _json
 from pathlib import Path
 
 from .manifest import manifest_digest, validate_manifest, relative_path
@@ -48,8 +52,61 @@ def check_parent(store, parent, *, active_path):
     require(not store.pending_promotions(), 'Unresolved publication journal')
 
 
+def _sharded_selection(result, original, loader, shard_payloads):
+    """Keep untouched blocks byte-identical; split changed blocks on pair boundaries."""
+    selected = {key(p): p for p in result['selected_partitions']}
+    declared = {key(p): p for p in result['coverage']['declared']}
+    touched = {(p['lawd_code'], p['deal_ymd']) for p in result['batch_scope']['declared_pairs']}
+    refs = []
+    blocks = []
+    for ref in original.get('coverage_shards', []):
+        block = json.loads(loader(ref['path']))
+        pairs = {key(p)[:2] for p in block['coverage']['declared'] + block['selected_partitions']}
+        if pairs.isdisjoint(touched):
+            refs.append(ref)
+            for p in block['selected_partitions']:
+                selected.pop(key(p), None)
+            for p in block['coverage']['declared']:
+                declared.pop(key(p), None)
+        else:
+            blocks.append(pairs)
+    blocks.append({k[:2] for k in declared} - set().union(set(), *blocks))
+    for pairs in blocks:
+        # At most 8 entries per pair (two selected and six coverage entries).
+        chunk = []
+        def emit(group):
+            if not group:
+                return
+            ps = [selected[k] for k in sorted(selected) if k[:2] in group]
+            ds = [declared[k] for k in sorted(declared) if k[:2] in group]
+            cov = coverage_for_partitions(ps, ds)
+            block = dict(schema_version='kapa-runtime-coverage/1', selected_partitions=ps,
+                         coverage=cov, license='SPDX-License-Identifier: GPL-3.0-only')
+            payload = (_json(block) + '\n').encode()
+            count = len(ps) + sum(len(cov[n]) for n in v2.COVERAGE)
+            if len(payload) > v2.MAX_METADATA_BYTES or count > v2.MAX_SHARD_ENTRIES:
+                require(len(group) > 1, 'Metadata limit exceeded')
+                middle = len(group) // 2
+                emit(group[:middle])
+                emit(group[middle:])
+                return
+            sha = hashlib.sha256(payload).hexdigest()
+            name = f'manifests/coverage/{sha}.json'
+            shard_payloads[name] = payload
+            refs.append(dict(path=name, sha256=sha, entries=count))
+        for pair in sorted(pairs):
+            chunk.append(pair)
+            if len(chunk) >= max(1, v2.MAX_SHARD_ENTRIES // 8):
+                emit(chunk)
+                chunk = []
+        emit(chunk)
+    result.update(selected_partitions=[], coverage=coverage_for_partitions([], []),
+                  coverage_shards=sorted(refs, key=lambda r: r['path']))
+
+
 def assemble_snapshot(template, parent, batch, *, trusted_digests, origins,
-                      loader=None, legacy_partitions=None, tombstones=(), retained=(), enabled=False):
+                      loader=None, legacy_partitions=None, tombstones=(), retained=(),
+                      shard_payloads=None, enabled=False):
     """Pure assembly with explicit trusted publications and origin manifests.
 
     A v1 parent needs externally verified legacy partition evidence; this function
@@ -114,7 +171,15 @@ def assemble_snapshot(template, parent, batch, *, trusted_digests, origins,
         batch_scope={'declared_pairs': [dict(lawd_code=c, deal_ymd=m)
                      for c, m in sorted({key(p)[:2] for p in batch})]},
         coverage=coverage_for_partitions(selected, [declared[k] for k in sorted(declared)]))
-    return validate_manifest(result)
+    if original.get('coverage_shards') or len((_json(result) + '\n').encode()) > v2.MAX_METADATA_BYTES:
+        require(shard_payloads is not None, 'Shard output required')
+        result['quality']['inherited_origins'] = {
+            **original.get('quality', {}).get('inherited_origins', {}),
+            parent['release_id']: parent_digest}
+        _sharded_selection(result, original, loader, shard_payloads)
+    checked = validate_manifest(result)
+    resolve_snapshot(checked, lambda name: shard_payloads[name] if name in (shard_payloads or {}) else loader(name))
+    return checked
 
 
 def build_snapshot(store, template, parent, batch, *, active_path, origins, enabled=False, **kwargs):
@@ -124,7 +189,8 @@ def build_snapshot(store, template, parent, batch, *, active_path, origins, enab
     trusted = {rid: published_digest(store, rid) for rid in origins}
     result = assemble_snapshot(template, parent, batch, trusted_digests=trusted,
                                origins=origins, enabled=True, **kwargs)
-    store.record_snapshot(result)
+    payloads = kwargs.get('shard_payloads') or {}
+    store.record_snapshot(result, loader=lambda name: payloads[name] if name in payloads else kwargs['loader'](name))
     return result
 
 
