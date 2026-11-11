@@ -13,7 +13,8 @@ import duckdb
 import pyarrow as pa
 import pyarrow.dataset as ds
 
-from .snapshot_query import BATCH_SIZE, PROVENANCE_LIMIT, SnapshotIntegrityError, SnapshotInventory
+from .snapshot_query import (BATCH_SIZE, PROVENANCE_LIMIT, DEFAULT_METADATA_BUDGET,
+                             SnapshotIntegrityError, SnapshotInventory)
 
 from .parquet import SCHEMA, schema_for, _TIME_FIELDS, _row, _safe_path, read_partition
 
@@ -46,7 +47,8 @@ class TransactionQuery:
     of the same already-readable query. No secret or per-instance key is needed.
     """
 
-    def __init__(self, snapshot_root, *, data_schema_version="kapa-runtime-data/2", manifest=None):
+    def __init__(self, snapshot_root, *, data_schema_version="kapa-runtime-data/2", manifest=None,
+                 metadata_budget=DEFAULT_METADATA_BUDGET, root_metadata_bytes=None):
         schema_for(data_schema_version)
         self.data_schema_version = data_schema_version
         self.root = Path(snapshot_root).absolute()
@@ -57,7 +59,8 @@ class TransactionQuery:
         self.root_manifest_digest = None
         self._snapshot_digest = None
         try:
-            self.inventory = SnapshotInventory(self.root, manifest) if manifest is not None else None
+            self.inventory = SnapshotInventory(self.root, manifest, metadata_budget=metadata_budget,
+                root_metadata_bytes=root_metadata_bytes) if manifest is not None else None
         except Exception as exc:
             raise SnapshotIntegrityError('snapshot_inventory_unverified') from exc
 

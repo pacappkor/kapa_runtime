@@ -10,8 +10,10 @@ from pathlib import Path
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
-from ..releases.manifest import manifest_digest, relative_path
-from ..releases.manifest_v2 import COVERAGE, KEY, resolve_snapshot, resolve_snapshot_inventory
+from ..releases.manifest import dumps_manifest, manifest_digest, relative_path
+from ..releases.manifest_v2 import COVERAGE, KEY, resolve_snapshot
+
+DEFAULT_METADATA_BUDGET = 256 * 1024 * 1024
 from .metadata import read_metadata
 from .parquet import _safe_path, schema_for
 
@@ -89,22 +91,36 @@ def overlaps(partition, filters):
 
 
 class SnapshotInventory:
-    def __init__(self, root, manifest):
+    def __init__(self, root, manifest, *, metadata_budget=DEFAULT_METADATA_BUDGET,
+                 root_metadata_bytes=None):
         self.root = Path(root)
         manifest = copy.deepcopy(manifest)
         self.manifest = manifest
         self.digest = manifest_digest(manifest)
-        # Cache bounded shard bytes so both common resolvers see exactly one capture.
-        shards = {}
+        if type(metadata_budget) is not int or metadata_budget <= 0:
+            raise ValueError('metadata_budget must be a positive integer')
+        canonical_bytes = len(dumps_manifest(manifest).encode('utf-8'))
+        self.metadata_bytes = max(canonical_bytes, root_metadata_bytes or 0)
+        def check_budget():
+            if self.metadata_bytes > metadata_budget:
+                raise SnapshotIntegrityError('snapshot_metadata_budget_exceeded')
+        check_budget()
         def load(name):
-            if name not in shards:
-                path = self.root / relative_path(name)
-                _safe_path(path)
-                shards[name] = read_metadata(path, as_bytes=True)
-            return shards[name]
-        self.entries = resolve_snapshot_inventory(manifest, load)
+            path = self.root / relative_path(name)
+            _safe_path(path)
+            try:
+                payload = read_metadata(path, as_bytes=True,
+                                        max_bytes=metadata_budget - self.metadata_bytes)
+            except ValueError as exc:
+                raise SnapshotIntegrityError('snapshot_metadata_unverified') from exc
+            self.metadata_bytes += len(payload)
+            check_budget()
+            return payload
+        # Resolve once: no raw-byte cache and no second decoded snapshot.
         self.resolved = resolve_snapshot(manifest, load)
         self.partitions = self.resolved['selected_partitions']
+        self.entries = sorted(manifest['files'] + [f for p in self.partitions for f in p['files']],
+                              key=lambda f: f['path'])
         self.shards = [dict(path=r['path'], sha256=r['sha256'], rows=0)
                        for r in manifest['coverage_shards']]
 

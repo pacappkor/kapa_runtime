@@ -87,3 +87,33 @@ membership, zero/gaps, producer/observation provenance and explicit unknown
 staleness (no unapproved SLA). Full inventory verification costs remain intentional;
 reducing them requires a separate decision. Publication/bootstrap integration and
 real-data smoke remain subsequent orchestration responsibilities.
+
+#### Metadata resource bounds (PR #12 follow-up)
+
+The ACTIVE query reader budgets root plus all coverage-shard raw bytes at **256 MiB**
+by default, in addition to the existing **16 MiB per-file** limit. Trusted Python
+callers may set `metadata_budget` on `search_active`, `TransactionQuery`, or
+`SnapshotInventory`; it is not an untrusted MCP argument. ACTIVE uses the actual
+root bytes (including whitespace); dictionary-only callers use canonical root size.
+Shard reads are capped by the remaining budget before allocation. Budget failures
+fail closed as `SnapshotIntegrityError`, surfaced by MCP as `status: "error"`
+with the distinct `data.error_code: "active_snapshot_unverified"`, not
+`invalid_request` or partial results.
+This is a raw metadata budget, not a promise that process RSS stays below 256 MiB.
+
+Each shard is parsed once, its raw bytes released immediately, and inventory is
+built from the single decoded view. ACTIVE reuses that view for full pre/post file
+and shard hashing rather than resolving metadata repeatedly; no integrity checks
+are removed.
+
+The v2 writer/reader contract now bounds every string value and object key to
+**256 Unicode characters**, except file `path`, `unresolved_gaps` items and
+`terms_basis`, which allow **4096 characters**. Existing stricter formats remain:
+identifiers are still at most **128 characters**, hashes and dates retain their
+validation, and repository keys are at most 256. This includes extensible nested
+quality/provenance fields, root/partition parser versions, source runs, revisions,
+and previous-observation references. v1 is unchanged. Over-limit v2 input is
+rejected, never truncated. The local step-3b writer uses UUID run/observation IDs,
+short parser versions, ISO timestamps and digests; its `quality.terms_evidence`
+shape remains supported with the explicit 4096-character `terms_basis` allowance.
+Operators must shorten longer terms text or reference separately stored evidence.

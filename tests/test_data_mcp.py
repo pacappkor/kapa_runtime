@@ -89,6 +89,24 @@ def unpack(result):
     return json.loads(result.content[0].text)
 
 
+def test_metadata_budget_failure_protocol(active, monkeypatch):
+    from kapa_runtime.mcp import server
+    from kapa_runtime.storage.active import search_active
+
+    def bounded_search(*args, **kwargs):
+        return search_active(*args, **kwargs, metadata_budget=1)
+
+    monkeypatch.setattr(server, 'search_active', bounded_search)
+
+    async def exercise():
+        async with Client(create_server(active), mode='legacy') as client:
+            result = unpack(await client.call_tool('search_transactions', {}))
+            assert result['status'] == 'error'
+            assert result['data']['error_code'] == 'active_snapshot_unverified'
+
+    asyncio.run(exercise())
+
+
 def test_official_in_memory_protocol(active):
     async def exercise():
         async with Client(create_server(active), mode="legacy") as client:

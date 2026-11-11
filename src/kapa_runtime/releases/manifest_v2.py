@@ -14,6 +14,26 @@ MAX_SHARDS = 1024
 MAX_SHARD_ENTRIES = 4096
 MAX_SNAPSHOT_ENTRIES = 250_000
 MAX_BATCH_PAIRS = 60
+MAX_STRING_CHARS = 256
+MAX_TEXT_CHARS = 4096
+
+
+def bounded_strings(value, field=None):
+    """Bound every v2 string, including extensible quality/provenance values."""
+    pending = [(value, field)]
+    while pending:
+        item, name = pending.pop()
+        if isinstance(item, str):
+            limit = MAX_TEXT_CHARS if name in ('path', 'unresolved_gaps', 'terms_basis') else MAX_STRING_CHARS
+            require(len(item) <= limit, 'Metadata string length limit exceeded')
+        elif isinstance(item, dict):
+            for k, v in item.items():
+                require(isinstance(k, str) and len(k) <= MAX_STRING_CHARS,
+                        'Metadata field name length limit exceeded')
+                pending.append((v, k))
+        elif isinstance(item, list):
+            pending.extend((v, name) for v in item)
+
 SERVICES = ("molit-apartment-rent", "molit-apartment-sale")
 KEY = {"service_id", "lawd_code", "deal_ymd"}
 COVERAGE = {"declared", "observed", "zero", "not_collected"}
@@ -68,6 +88,7 @@ def files(values):
 
 
 def partition(p):
+    bounded_strings(p)
     fields = KEY | {"producer_release_id", "origin_digest", "observation_id", "run_id", "fetched_at",
                     "status", "rows", "parser_version", "schema", "files", "previous_observation", "evidence_digest"}
     require(isinstance(p, dict) and set(p) == fields, "Invalid partition fields")
@@ -145,6 +166,7 @@ def validate_selection(m, partitions, cov):
 
 
 def validate_root(m):
+    bounded_strings(m)
     require(len((_json(m) + "\n").encode("utf-8")) <= MAX_METADATA_BYTES, "Metadata limit exceeded")
     fields = {"schema_version", "release_id", "state", "created_at", "source_runs", "github_revisions",
               "hugging_face_revisions", "parser_version", "data_schema_version", "files", "coverage",
@@ -203,6 +225,8 @@ def resolve_snapshot(manifest, loader):
             shard = json.loads(payload.decode("utf-8"), object_pairs_hook=_pairs, parse_constant=_constant)
         except (UnicodeError, ValueError, TypeError):
             raise ManifestError("Invalid shard JSON") from None
+        del payload  # Never retain raw shards alongside the accumulated decoded view.
+        bounded_strings(shard)
         require(isinstance(shard, dict) and set(shard) == {"schema_version", "selected_partitions", "coverage", "license"}
                 and shard["schema_version"] == "kapa-runtime-coverage/1"
                 and shard["license"] == "SPDX-License-Identifier: GPL-3.0-only", "Invalid flat shard")

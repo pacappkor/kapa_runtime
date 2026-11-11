@@ -249,12 +249,14 @@ def test_non_cartesian_gaps_and_origins():
 
 def test_metadata_boundary():
     m = root()
-    base = len(dumps_manifest(m).encode())
-    m["quality"]["padding"] = ""
-    overhead = len(dumps_manifest(m).encode()) - base
-    m["quality"]["padding"] = "x" * (v2.MAX_METADATA_BYTES - base - overhead)
+    # Respect per-string bounds while exercising the independent total cap.
+    m["quality"]["padding"] = ["x" * 256] * 64000 + [""]
+    remaining = v2.MAX_METADATA_BYTES - len(dumps_manifest(m).encode())
+    count, tail = divmod(remaining, 259)  # 256 chars plus quotes and comma
+    m["quality"]["padding"].extend(["x" * 256] * count)
+    m["quality"]["padding"][64000] = "x" * tail
     assert len(dumps_manifest(m).encode()) == v2.MAX_METADATA_BYTES
-    m["quality"]["padding"] += "x"
+    m["quality"]["padding"].append(0)
     with pytest.raises(ManifestError, match="Metadata"):
         validate_manifest(m)
     m, payload = sharded()

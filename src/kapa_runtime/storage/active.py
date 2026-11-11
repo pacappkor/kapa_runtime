@@ -8,10 +8,12 @@ import json
 import re
 import sqlite3
 
-from ..releases.manifest import load_manifest, manifest_digest
+from ..releases.manifest import loads_manifest, manifest_digest
+from .metadata import read_metadata
 from .parquet import _safe_path
 from .query import TransactionQuery, _json
-from .snapshot_query import SnapshotInventory, SnapshotIntegrityError, verify_files
+from .snapshot_query import (DEFAULT_METADATA_BUDGET, SnapshotInventory,
+                             SnapshotIntegrityError, verify_files)
 from ..releases.manifest_v2 import key
 
 
@@ -19,10 +21,10 @@ class ActiveSnapshotError(ValueError):
     """Fixed, value-free read failure."""
 
 
-def verify_local(root, manifest):
+def verify_local(root, manifest, *, inventory=None):
     """Check the complete file inventory, bytes, schema and row counts."""
     if manifest['schema_version'] == 'kapa-runtime-release/2':
-        SnapshotInventory(root, manifest).verify()
+        (inventory if inventory is not None else SnapshotInventory(root, manifest)).verify()
         return
     _safe_path(root)
     version = manifest["data_schema_version"]
@@ -37,13 +39,17 @@ def verify_local(root, manifest):
     verify_files(root, manifest['files'], version)
 
 
-def search_active(settings, filters, *, limit=100, cursor=None, coverage_only=False):
+def search_active(settings, filters, *, limit=100, cursor=None, coverage_only=False,
+                  metadata_budget=DEFAULT_METADATA_BUDGET):
     """Capture one active pointer; never follow latest or initialize/write a ledger."""
     _safe_path(settings.active_manifest)
     if not settings.active_manifest.exists():
         raise ActiveSnapshotError("no_active_release")
     try:
-        manifest = load_manifest(settings.active_manifest)
+        root_payload = read_metadata(settings.active_manifest, as_bytes=True, max_bytes=metadata_budget)
+        root_metadata_bytes = len(root_payload)
+        manifest = loads_manifest(root_payload.decode('utf-8'))
+        del root_payload
         release_id = manifest["release_id"]
         if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}", release_id)
                 or manifest["state"] not in ("published", "active")):
@@ -56,12 +62,13 @@ def search_active(settings, filters, *, limit=100, cursor=None, coverage_only=Fa
         if len(evidence) != 1 or evidence[0].get("published_manifest_sha256") != manifest_digest(manifest):
             raise ValueError
         root = settings.snapshots_dir / release_id
-        verify_local(root, manifest)
+        query = TransactionQuery(root, data_schema_version=manifest['data_schema_version'],
+            manifest=manifest if manifest['schema_version'] == 'kapa-runtime-release/2' else None,
+            metadata_budget=metadata_budget, root_metadata_bytes=root_metadata_bytes)
+        verify_local(root, manifest, inventory=query.inventory)
     except Exception:
         raise ActiveSnapshotError("active_snapshot_unverified") from None
     try:
-        query = TransactionQuery(root, data_schema_version=manifest['data_schema_version'],
-            manifest=manifest if manifest['schema_version'] == 'kapa-runtime-release/2' else None)
         query.root_manifest_digest = manifest_digest(manifest)
         if coverage_only:
             if not isinstance(filters, dict) or filters.keys() - {'service_id', 'lawd_code', 'contract_date_from', 'contract_date_to'}:
@@ -102,13 +109,13 @@ def search_active(settings, filters, *, limit=100, cursor=None, coverage_only=Fa
         # A read may fail before post-verification (including Arrow/DuckDB IO).
         # Recheck integrity before treating the original error as invalid input.
         try:
-            verify_local(root, manifest)
+            verify_local(root, manifest, inventory=query.inventory)
         except Exception:
             raise ActiveSnapshotError("active_snapshot_unverified") from None
         raise
     # Detect changes during the search before releasing rows to the caller.
     try:
-        verify_local(root, manifest)
+        verify_local(root, manifest, inventory=query.inventory)
     except Exception:
         raise ActiveSnapshotError("active_snapshot_unverified") from None
     result.update(release_state="active", verification={"complete": True, "hashes_verified": True,
