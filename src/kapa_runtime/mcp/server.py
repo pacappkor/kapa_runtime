@@ -31,7 +31,11 @@ def envelope(status, data=None, *, manifest=None, result=None):
         "excluded": result.get("excluded", {"count": 0, "reason": None}),
         "verification": result.get("verification", {}),
         "limitations": result.get("limitations", ["Coverage is not a legal verification."]),
-        "coverage": {"release": manifest["coverage"], "query": result.get("coverage", {})} if manifest else {},
+        "coverage": {"release": ({"scope": "digest-bound-exact-sets",
+                                   "details": "Use get_data_coverage and follow next_cursor."}
+                                  if manifest.get("schema_version") == "kapa-runtime-release/2"
+                                  else manifest["coverage"]),
+                     "query": result.get("coverage", {})} if manifest else {},
         "warnings": result.get("warnings", []),
         "unresolved_gaps": manifest["unresolved_gaps"] if manifest else [],
         "next_cursor": result.get("next_cursor"),
