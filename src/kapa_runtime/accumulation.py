@@ -20,7 +20,7 @@ from .planning import Budget, plan_day
 from .registry import ServiceRegistry
 from .releases.hf import scan_secret_payload
 from .releases.manifest import build_manifest, dumps_manifest, manifest_digest, relative_path
-from .releases.manifest_v2 import resolve_snapshot
+from .releases.manifest_v2 import bounded_strings, resolve_snapshot
 from .releases.snapshot import build_snapshot, check_parent, materialize, preflight_selection, write_once
 from .storage.metadata import read_metadata
 from .storage.parquet import _safe_path, write_partition
@@ -280,6 +280,12 @@ def _terms(policy):
                    and isinstance(t.get("terms_basis"), str)
                    and bool(t["terms_basis"].strip()) for t in terms.values()),
                "build_evidence_required")
+    # Service dictionaries are copied intact into quality.terms_evidence.
+    # Reject oversized extensible metadata before reserving quota or collecting.
+    try:
+        bounded_strings(terms)
+    except ValueError:
+        raise p.PipelineError("build_evidence_required") from None
     return terms
 
 

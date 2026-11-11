@@ -261,7 +261,7 @@ def test_invalid_or_missing_pair_budget(setup, service, budget):
 
 
 @pytest.mark.parametrize('service', a.SERVICES)
-@pytest.mark.parametrize('basis', [None, '', ' \t\n', True, 1, ['review'], {'review': True}])
+@pytest.mark.parametrize('basis', [None, '', ' \t\n', True, 1, ['review'], {'review': True}, 'x' * 4097])
 def test_invalid_terms_before_collection(setup, service, basis):
     path = setup.data_root / 'operator-policy.json'
     policy = json.loads(path.read_text())
@@ -463,6 +463,17 @@ def test_sharded_parent_materializes_and_retries(setup):
     manifest = json.loads((setup.manifests_dir / 'sharded.json').read_text())
     assert ref in manifest['coverage_shards']
     assert (setup.snapshots_dir / 'sharded' / name).read_bytes() == payload
+    from kapa_runtime.releases.manifest import dumps_manifest
+    from kapa_runtime.storage.snapshot_query import SnapshotInventory
+    from kapa_runtime.storage.query import SnapshotIntegrityError
+    budget = len(dumps_manifest(manifest).encode('utf-8')) + sum(
+        len((setup.snapshots_dir / 'sharded' / r['path']).read_bytes())
+        for r in manifest['coverage_shards'])
+    inventory = SnapshotInventory(setup.snapshots_dir / 'sharded', manifest, metadata_budget=budget)
+    inventory.verify()
+    assert inventory.metadata_bytes == budget
+    with pytest.raises(SnapshotIntegrityError):
+        SnapshotInventory(setup.snapshots_dir / 'sharded', manifest, metadata_budget=budget - 1)
     with client(lambda _: pytest.fail('built job recollected')) as http:
         assert a.collect_batch(setup, job_id='sharded', client=http, clock=lambda: NOW)['state'] == 'validated'
 
@@ -588,3 +599,27 @@ def test_ownership_invariant_runs_before_collection(setup, monkeypatch):
             a.collect_batch(setup, job_id='ownership-preflight', client=http, clock=lambda: NOW)
     with StateStore(setup.state_db) as store:
         assert all(store.reserved_requests(s, '2026-11-12') == 0 for s in a.SERVICES)
+
+
+def test_terms_metadata_limits_before_collection(setup):
+    path = setup.data_root / 'operator-policy.json'
+    policy = json.loads(path.read_text())
+    policy['services'][a.SERVICES[0]]['review_note'] = 'x' * 257
+    path.write_text(json.dumps(policy))
+    before = setup.state_db.read_bytes()
+    with client(lambda _: pytest.fail('network before metadata validation')) as http:
+        with pytest.raises(a.p.PipelineError, match='build_evidence_required'):
+            a.collect_batch(setup, job_id='terms-length', client=http, clock=lambda: NOW)
+    assert setup.state_db.read_bytes() == before
+
+
+def test_terms_basis_maximum_builds(setup):
+    path = setup.data_root / 'operator-policy.json'
+    policy = json.loads(path.read_text())
+    for service in a.SERVICES:
+        policy['services'][service]['terms_basis'] = 'x' * 4096
+        policy['services'][service]['review_note'] = 'x' * 256
+    path.write_text(json.dumps(policy))
+    with client() as http:
+        assert a.collect_batch(setup, job_id='terms-boundary', client=http,
+                               clock=lambda: NOW)['state'] == 'validated'
