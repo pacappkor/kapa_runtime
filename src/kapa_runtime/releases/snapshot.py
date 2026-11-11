@@ -33,8 +33,13 @@ def published_digest(store, release_id):
     return value
 
 
-def check_parent(store, parent, active):
-    """Call under the StateStore writer lock, including immediately before publication."""
+def check_parent(store, parent, *, active_path):
+    """Read the current pointer under the writer lock, never a caller's cached manifest."""
+    from .activate import load_manifest
+    require(store._lock_fd is not None, 'StateStore writer lock required')
+    active_path = Path(active_path)
+    _safe_path(active_path)
+    active = load_manifest(active_path) if active_path.exists() else None
     require(active is not None and parent == {'release_id': active['release_id'],
             'digest': manifest_digest(active)}, 'Parent changed')
     require(published_digest(store, active['release_id']) == parent['digest'], 'Parent untrusted')
@@ -112,9 +117,10 @@ def assemble_snapshot(template, parent, batch, *, trusted_digests, origins,
     return validate_manifest(result)
 
 
-def build_snapshot(store, template, parent, batch, *, active, origins, enabled=False, **kwargs):
+def build_snapshot(store, template, parent, batch, *, active_path, origins, enabled=False, **kwargs):
     require(enabled is True, 'Cumulative snapshots disabled')
-    check_parent(store, dict(release_id=parent['release_id'], digest=manifest_digest(parent)), active)
+    check_parent(store, dict(release_id=parent['release_id'], digest=manifest_digest(parent)),
+                 active_path=active_path)
     trusted = {rid: published_digest(store, rid) for rid in origins}
     result = assemble_snapshot(template, parent, batch, trusted_digests=trusted,
                                origins=origins, enabled=True, **kwargs)

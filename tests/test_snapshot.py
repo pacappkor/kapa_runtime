@@ -88,9 +88,13 @@ def test_batch_duplicates_checked_before_previous_observation_overwrite():
         assemble(a, 'B', batch + [conflict], {'A': a})
 
 
-def test_parent_guards():
+def test_parent_guards(tmp_path):
+    from kapa_runtime.releases.manifest import dump_manifest
     a = root()
+    active_path = tmp_path / 'active.json'
+    dump_manifest(a, active_path)
     class Ledger:
+        _lock_fd = 1
         def get_release(self, rid):
             return {'guard_evidence': [{'state': 'published', 'evidence': {
                 'commit_reread': True, 'published_manifest_sha256': manifest_digest(a)}}]}
@@ -99,9 +103,9 @@ def test_parent_guards():
         def pending_promotions(self):
             return []
     with pytest.raises(ManifestError, match='Parent changed'):
-        check_parent(Ledger(), {'release_id': 'A', 'digest': 'f' * 64}, a)
+        check_parent(Ledger(), {'release_id': 'A', 'digest': 'f' * 64}, active_path=active_path)
     with pytest.raises(ManifestError, match='Published-but-not-active'):
-        check_parent(Ledger(), {'release_id': 'A', 'digest': manifest_digest(a)}, a)
+        check_parent(Ledger(), {'release_id': 'A', 'digest': manifest_digest(a)}, active_path=active_path)
 
 
 def test_legacy_bootstrap():
@@ -257,9 +261,10 @@ def test_promotion_retained_duplicate_evidence(monkeypatch, conflict):
             dict(entry, data_schema_version=a['data_schema_version'])]
 
 
-@pytest.mark.parametrize('withdrawn_repo', ['test/staging', 'test/public'])
+@pytest.mark.parametrize('terminal_state', ['published', 'quarantined'])
+@pytest.mark.parametrize('withdrawn_repo', [None, 'test/staging', 'test/public'])
 @pytest.mark.parametrize('conflict', [False, True])
-def test_promotion_checks_withdrawn_history(tmp_path, monkeypatch, withdrawn_repo, conflict):
+def test_promotion_checks_withdrawn_history(tmp_path, monkeypatch, withdrawn_repo, conflict, terminal_state):
     from types import SimpleNamespace
     from kapa_runtime.pipeline import _promotion_retained_files, PipelineError
 
@@ -284,7 +289,7 @@ def test_promotion_checks_withdrawn_history(tmp_path, monkeypatch, withdrawn_rep
             events.append({'state': 'published', 'at': rid, 'evidence': {
                 'reason': 'retained_partition_removed', 'repo_id': withdrawn_repo,
                 'removed_path': name}})
-        rows.append({'release_id': rid, 'state': 'published', 'guard_evidence': events})
+        rows.append({'release_id': rid, 'state': terminal_state, 'guard_evidence': events})
     store = SimpleNamespace(list_releases=lambda: rows,
                             get_release=lambda rid: next(r for r in rows if r['release_id'] == rid))
     settings = SimpleNamespace(active_manifest=tmp_path / 'absent', snapshots_dir=tmp_path)
@@ -295,9 +300,10 @@ def test_promotion_checks_withdrawn_history(tmp_path, monkeypatch, withdrawn_rep
             _promotion_retained_files(settings, store, 'test/staging', 'test/public')
     else:
         retained = _promotion_retained_files(settings, store, 'test/staging', 'test/public')
-        assert name not in {entry['path'] for entry in retained}
+        assert (name in {entry['path'] for entry in retained}) == (
+            withdrawn_repo is None and terminal_state == 'published')
         other = a['selected_partitions'][1]['files'][0]['path']
-        assert other in {entry['path'] for entry in retained}
+        assert (other in {entry['path'] for entry in retained}) == (terminal_state == 'published')
 
 
 def test_materialize_checks_complete_inventory(tmp_path):
@@ -331,3 +337,85 @@ def test_origin_tamper_and_disabled():
         assemble(b, 'C', partitions('C'), {'A': a, 'B': b})
     with pytest.raises(ManifestError, match='disabled'):
         assemble_snapshot(root(), a, [], origins={}, trusted_digests={})
+
+
+def test_build_snapshot_reloads_parent_after_activation(tmp_path):
+    from kapa_runtime.releases.manifest import dump_manifest, load_manifest
+    from kapa_runtime.releases.snapshot import build_snapshot
+    a = root()
+    pointer = tmp_path / 'active.json'
+    dump_manifest(a, pointer)
+    cached_parent = load_manifest(pointer)
+    b = assemble(a, 'B', partitions('B', '26110'), {'A': a})
+    # Another writer activates B after the caller read A, before this writer locks.
+    dump_manifest(b, pointer)
+    with StateStore(tmp_path / 'state.db') as store:
+        with pytest.raises(ManifestError, match='Parent changed'):
+            build_snapshot(store, root(), cached_parent, [], active_path=pointer,
+                           origins={'A': a}, enabled=True)
+
+
+@pytest.mark.parametrize('damage', ['missing', 'corrupt'])
+@pytest.mark.parametrize('corrupt_copy', [False, True])
+def test_retained_repair_uses_trusted_descendant(tmp_path, monkeypatch, damage, corrupt_copy):
+    import shutil
+    from types import SimpleNamespace
+    from kapa_runtime.pipeline import _retained_repair, _retained_owners
+    from kapa_runtime.releases.hf import PublishError
+    from kapa_runtime.releases.manifest import dump_manifest
+    from kapa_runtime.releases.snapshot import materialize
+    from kapa_runtime.releases.manifest_v2 import coverage_for_partitions, KEY
+    from kapa_runtime.storage.parquet import write_partition
+    from kapa_runtime.storage.state import REQUIRED_GUARDS
+    from kapa_runtime.models import ReleaseState
+
+    settings = SimpleNamespace(snapshots_dir=tmp_path / 'snapshots',
+        manifests_dir=tmp_path / 'manifests', active_manifest=tmp_path / 'active.json')
+    settings.manifests_dir.mkdir()
+    monkeypatch.setattr('kapa_runtime.pipeline._loaded_secrets', lambda *a, **k: [])
+    a = root()
+    payloads = {'README.md': b'readme'}
+    a['files'][0]['sha256'] = hashlib.sha256(payloads['README.md']).hexdigest()
+    for p in a['selected_partitions']:
+        written = write_partition([], tmp_path / 'source', asset_type='apartment',
+            transaction_type=p['service_id'].rsplit('-', 1)[1], lawd_code='11110',
+            contract_year=2025, contract_month=10)[0]
+        p.update(rows=0, status='zero')
+        p['files'][0].update(rows=0, sha256=written.sha256)
+        payloads[p['files'][0]['path']] = written.path.read_bytes()
+    a['coverage'] = coverage_for_partitions(a['selected_partitions'],
+        [{k: p[k] for k in KEY} for p in a['selected_partitions']])
+    a.update(state='published', github_revisions={'test/runtime': 'a' * 40},
+             hugging_face_revisions=[{'repo_id': 'test/repo', 'commit_sha': 'b' * 40}])
+    batch = partitions('B', '26110')
+    for p, inherited in zip(batch, a['selected_partitions']):
+        p.update(rows=0, status='zero')
+        p['files'][0].update(rows=0, sha256=inherited['files'][0]['sha256'])
+        payloads[p['files'][0]['path']] = payloads[inherited['files'][0]['path']]
+    b = assemble(a, 'B', batch, {'A': a})
+    b.update(state='published', files=copy.deepcopy(a['files']),
+             github_revisions=a['github_revisions'], hugging_face_revisions=a['hugging_face_revisions'])
+    with StateStore(tmp_path / 'state.db') as store:
+        for m in (a, b):
+            for state in list(ReleaseState)[:7]:
+                evidence = {k: True for k in REQUIRED_GUARDS.get(state, ())}
+                if state == ReleaseState.PUBLISHED:
+                    evidence['published_manifest_sha256'] = manifest_digest(m)
+                store.transition_release(m['release_id'], state, evidence)
+            dump_manifest(m, settings.manifests_dir / (m['release_id'] + '.json'))
+            materialize(m, settings.snapshots_dir / m['release_id'], payloads.__getitem__, enabled=True)
+        name = a['selected_partitions'][0]['files'][0]['path']
+        if damage == 'missing':
+            shutil.rmtree(settings.snapshots_dir / 'A')
+        else:
+            (settings.snapshots_dir / 'A' / name).write_bytes(b'damaged producer')
+        if corrupt_copy:
+            (settings.snapshots_dir / 'B' / name).write_bytes(b'damaged descendant')
+        owners, _ = _retained_owners(settings, store, 'test/repo')
+        assert owners[name][0] == 'A'
+        repair = _retained_repair(settings, store, 'test/repo', [])
+        if corrupt_copy:
+            with pytest.raises(PublishError, match='immutable_retained_partition_unrecoverable'):
+                repair(name, [owners[name][2]])
+        else:
+            assert repair(name, [owners[name][2]]) == payloads[name]

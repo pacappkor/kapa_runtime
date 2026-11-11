@@ -576,7 +576,7 @@ def _trusted_published_manifest(settings, store, release_id, *, path=None):
 
 
 def _retained_owners(settings, store, repo_id, *, as_of=None, tombstones=None,
-                     historical_evidence=None):
+                     historical_evidence=None, repair_locations=None):
     cutoff = None
     if as_of is not None:
         _trusted_published_manifest(settings, store, as_of)
@@ -591,11 +591,12 @@ def _retained_owners(settings, store, repo_id, *, as_of=None, tombstones=None,
     required_id = as_of if as_of is not None else active_id
     published = []
     for row in store.list_releases():
-        if row["state"] not in ("published", "active"):
-            continue
         order = [e["at"] for e in row["guard_evidence"] if e["state"] == "published"
                  and e["evidence"].get("commit_reread") is True]
-        _require(len(order) == 1, "retained_publish_order_required")
+        if row['state'] in ('published', 'active'):
+            _require(len(order) == 1, "retained_publish_order_required")
+        elif len(order) != 1:
+            continue
         if cutoff is not None and order[0] > cutoff:
             continue
         try:
@@ -660,12 +661,18 @@ def _retained_owners(settings, store, repo_id, *, as_of=None, tombstones=None,
                 previous = immutable_evidence.get(entry['path'])
                 _require(previous is None or previous == evidence, 'immutable_path_conflict')
                 immutable_evidence[entry['path']] = evidence
+                if repair_locations is not None:
+                    repair_locations.setdefault(entry['path'], []).append((release_id, manifest, entry))
+                if row['state'] not in ('published', 'active'):
+                    continue
                 if entry['path'] not in removed:
                     owners[entry['path']] = (producer, origin, entry)
                 else:
                     owners.pop(entry['path'], None)
                     if tombstones is not None:
                         tombstones.add(entry['path'])
+                continue
+            if row['state'] not in ('published', 'active'):
                 continue
             # Historical verification requires the target, not today's active owner.
             if entry['path'] not in removed or release_id == required_id:
@@ -730,12 +737,17 @@ def _promotion_retained_files(settings, store, staging_repo, public_repo):
 
 
 def _retained_repair(settings, store, repo_id, warnings):
-    selected, active_id = _retained_owners(settings, store, repo_id)
+    locations = {}
+    selected, active_id = _retained_owners(settings, store, repo_id, repair_locations=locations)
     owners = {name: [owner] for name, owner in selected.items()}
+    # Ownership remains the producer's evidence; physical copies are only repair sources.
+    candidates = {name: values + sorted(
+        (location for location in locations.get(name, []) if location not in values),
+        key=lambda location: location[0]) for name, values in owners.items()}
 
     def repair(name, entries):
         from .releases.hf import PublishError, scan_secret_payload
-        for release_id, manifest, entry in owners.get(name, []):
+        for release_id, manifest, entry in candidates.get(name, []):
             if not any(all(e.get(k) == v for k, v in entry.items()) for e in entries):
                 continue
             try:
