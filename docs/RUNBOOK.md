@@ -393,3 +393,60 @@ zero는 수집 완료이며 미수집 gap과 구분한다. 현재 선택만 조�
 현재 quota/CLI가 이 신규 정책을 구현했다고 해석하지 않는다. parent 재확인,
 origin 검증, tombstone-after-union, write-once 경로, atomic activation 및
 published-but-not-active 차단을 통합·검증하기 전에는 누적 운영을 시작하지 않는다.
+
+## Cumulative ACTIVE query and coverage (step 5)
+
+Install the optional server with `uv sync --locked --extra test --extra mcp`.
+`kapa-runtime-mcp` exposes three read-only, credential-free tools:
+`list_data_capabilities`, `search_transactions`, and `get_data_coverage`.
+No tool collects, publishes, opens arbitrary paths, accepts SQL, or contacts a provider.
+
+For v2 ACTIVE, the publication ledger binds one captured root digest. The reader
+resolves explicit hash-bound coverage shards and current files; retained/archive
+files are never globbed or queried. Every request verifies the entire current
+inventory before and after execution, including unqueried partitions. Selected
+files additionally receive pre/post hash/schema/decoded-row checks. Verification
+also checks data against partition region/month/service/observation metadata.
+This retains full verification I/O; query pruning is not a reduced trust mode.
+
+Example search arguments: `{"filters":{"lawd_code":"11110","contract_date_from":"2025-10-01"},"limit":100}`.
+Coverage arguments: `{"filters":{"service_id":"molit-apartment-sale","lawd_code":"11110"},"limit":100}`.
+Coverage also accepts `contract_date_from/to`. Limits are 1..1000. Follow
+`next_cursor` until null, using identical filters. Cursors bind root digest,
+query and stable ordering; restart pagination after activation or provenance changes.
+
+Coverage pages contain distinct exact service/region/month keys, with separate
+`declared`, `observed`, `zero`, `not_collected` memberships. Never multiply region
+and month lists. Zero means observed with zero transactions, not missing data.
+`gaps_overlapping_query` is page-local for coverage pages; `complete` describes
+the whole filtered declared set. Unstructured manifest gaps remain separately
+reported and cannot safely be assigned to a particular partition.
+For both query tools, `data` contains only `rows` and `total`; metadata appears
+only in the envelope (`coverage.query`, `partition_provenance`, `excluded`,
+`verification`, `limitations`, `warnings`, `next_cursor`). Consumers formerly
+reading these fields under `data` must use their envelope locations.
+Search coverage is a fixed-size pointer to `get_data_coverage`, not inline key sets.
+Search provenance includes only partitions contributing returned rows, capped at
+100 entries; `partition_provenance_summary` reports total contributors, limit and
+truncation. Use coverage pages for complete provenance. Coverage pages retain
+per-partition producer, observation, origin digest and `fetched_at`.
+A valid v2 coverage filter matching no declared or observed key returns `no_data`;
+a declared uncollected key still returns `ok`. Legacy coverage remains `ok` even
+though it has no exact-key row count.
+Staleness is explicitly unknown: no freshness SLA is inferred from collection cadence.
+Inspect timestamps before relying on old observations. Cancellation exclusions,
+snapshot digest, pinned dataset revisions, limitations and `legal_verified=false`
+remain in responses. v1 retains its legacy coverage and query behavior.
+
+Arrow scans use 4096-row batches and one-fragment/one-batch readahead. Count scans
+project only predicate columns; row pages project the response schema. DuckDB
+has a 256 MB working-memory limit and external access disabled. Deep OFFSET sorts
+can fail within that bound rather than silently exhausting memory; narrow the query
+or restart with smaller scope. No process-wide constant-memory claim is made.
+
+Integrity failures at any point, including between initial verification and a
+shard/data read, return `error` with `active_snapshot_unverified`, never
+`invalid_query` or a normal empty result.
+Fail-closed errors require checking the local snapshot and publication evidence;
+never repair a manifest hash by hand or bypass the ledger. This read path does not
+make the separate cumulative publication/bootstrap rollout operational.
