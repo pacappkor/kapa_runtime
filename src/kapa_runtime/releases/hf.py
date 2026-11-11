@@ -561,11 +561,20 @@ class _HubWriter:
             self._private()
         except Exception:
             return VerificationReport(manifest_digest(m), (), (), ("privacy_check_failed",))
+        from .manifest_v2 import resolve_snapshot_inventory
+        try:
+            selected = resolve_snapshot_inventory(m, lambda name: download_bytes(
+                self.api, self.repo_id, name, revision=commit_sha, cache_dir=cache_dir,
+                token=self._read_token))
+            selected = selected + [dict(path=r['path'], sha256=r['sha256'], rows=0)
+                                   for r in m.get('coverage_shards', [])]
+        except Exception:
+            return VerificationReport(manifest_digest(m), (), (), ('snapshot_resolution_failed',))
         retained = {}
         remote = []
         tree_enumerated = False
         try:
-            current_paths = {entry["path"] for entry in m["files"]}
+            current_paths = {entry["path"] for entry in selected}
             # Paths alone are not evidence: require complete trusted file entries.
             for entry in previous_files:
                 if (not isinstance(entry, dict) or set(entry) not in ({"path", "sha256", "rows"}, {"path", "sha256", "rows", "data_schema_version"})
@@ -632,7 +641,7 @@ class _HubWriter:
                     inventory[name] = (digest, retained[name][0].get("data_schema_version", "kapa-runtime-data/2"))
             except Exception:
                 errors.append("retained_file_verification_failed")
-        for entry in m["files"]:
+        for entry in selected:
             try:
                 payload = download_bytes(self.api, self.repo_id, entry["path"],
                                                      revision=commit_sha, cache_dir=cache_dir,

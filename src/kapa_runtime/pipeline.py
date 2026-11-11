@@ -386,10 +386,12 @@ def _verify_workspace(settings, manifest):
 def _verify_local(root, manifest):
     version = manifest.get("data_schema_version", "kapa-runtime-data/2")
     expected_schema = schema_for(version)
-    expected = {f["path"] for f in manifest["files"] if f["path"].endswith(".parquet")}
+    from .releases.snapshot import inventory
+    selected = inventory(manifest, root)
+    expected = {f["path"] for f in selected if f["path"].endswith(".parquet")}
     actual = {p.relative_to(root).as_posix() for p in root.rglob("*.parquet")}
     _require(expected == actual, "snapshot_file_set_mismatch")
-    for entry in manifest["files"]:
+    for entry in selected:
         path = root / relative_path(entry["path"])
         _safe_path(path)
         _require(_hash(path) == entry["sha256"], "local_hash_mismatch")
@@ -573,7 +575,8 @@ def _trusted_published_manifest(settings, store, release_id, *, path=None):
     return manifest
 
 
-def _retained_owners(settings, store, repo_id, *, as_of=None, tombstones=None):
+def _retained_owners(settings, store, repo_id, *, as_of=None, tombstones=None,
+                     historical_evidence=None, repair_locations=None):
     cutoff = None
     if as_of is not None:
         _trusted_published_manifest(settings, store, as_of)
@@ -588,11 +591,12 @@ def _retained_owners(settings, store, repo_id, *, as_of=None, tombstones=None):
     required_id = as_of if as_of is not None else active_id
     published = []
     for row in store.list_releases():
-        if row["state"] not in ("published", "active"):
-            continue
         order = [e["at"] for e in row["guard_evidence"] if e["state"] == "published"
                  and e["evidence"].get("commit_reread") is True]
-        _require(len(order) == 1, "retained_publish_order_required")
+        if row['state'] in ('published', 'active'):
+            _require(len(order) == 1, "retained_publish_order_required")
+        elif len(order) != 1:
+            continue
         if cutoff is not None and order[0] > cutoff:
             continue
         try:
@@ -605,6 +609,7 @@ def _retained_owners(settings, store, repo_id, *, as_of=None, tombstones=None):
             preferred = row['release_id'] == required_id
             published.append((preferred, order[0], row["release_id"], manifest))
     owners = {}
+    immutable_evidence = {}
     for _, _, release_id, manifest in sorted(published):
         row = store.get_release(release_id)
         removed = set()
@@ -631,7 +636,44 @@ def _retained_owners(settings, store, repo_id, *, as_of=None, tombstones=None):
                      'retained_removal_repo_unresolved')
             if removal_repo == repo_id:
                 removed.add(evidence['removed_path'])
-        for entry in manifest["files"]:
+        from .releases.snapshot import inventory, published_digest
+        entries = inventory(manifest, settings.snapshots_dir / release_id)
+        for entry in entries:
+            if entry['path'].startswith('data/observations/'):
+                from .releases.manifest_v2 import resolve_snapshot
+                resolved = resolve_snapshot(manifest, lambda name: read_metadata(
+                    settings.snapshots_dir / release_id / relative_path(name), as_bytes=True))
+                partition = next(p for p in resolved['selected_partitions'] if entry in p['files'])
+                producer = partition['producer_release_id']
+                if producer != release_id:
+                    origin = _trusted_published_manifest(settings, store, producer)
+                    bound = published_digest(store, producer)
+                    resolved_origin = resolve_snapshot(origin, lambda name: read_metadata(
+                        settings.snapshots_dir / producer / relative_path(name), as_bytes=True))
+                    _require(partition['origin_digest'] == bound
+                             and any({**p, 'origin_digest': bound} == partition
+                                     for p in resolved_origin.get('selected_partitions', [])),
+                             'retained_origin_untrusted')
+                else:
+                    origin = manifest
+                # Keep evidence even after withdrawal: removal must not erase a conflict.
+                evidence = {**partition, 'origin_digest': published_digest(store, producer)}
+                previous = immutable_evidence.get(entry['path'])
+                _require(previous is None or previous == evidence, 'immutable_path_conflict')
+                immutable_evidence[entry['path']] = evidence
+                if repair_locations is not None:
+                    repair_locations.setdefault(entry['path'], []).append((release_id, manifest, entry))
+                if row['state'] not in ('published', 'active'):
+                    continue
+                if entry['path'] not in removed:
+                    owners[entry['path']] = (producer, origin, entry)
+                else:
+                    owners.pop(entry['path'], None)
+                    if tombstones is not None:
+                        tombstones.add(entry['path'])
+                continue
+            if row['state'] not in ('published', 'active'):
+                continue
             # Historical verification requires the target, not today's active owner.
             if entry['path'] not in removed or release_id == required_id:
                 owners[entry["path"]] = (release_id, manifest, entry)
@@ -642,6 +684,19 @@ def _retained_owners(settings, store, repo_id, *, as_of=None, tombstones=None):
                 owners.pop(entry['path'], None)
                 if tombstones is not None:
                     tombstones.add(entry['path'])
+    # Observation withdrawals are permanent, independent of selection order.
+    withdrawn = {event['evidence']['removed_path']
+                 for row in store.list_releases() for event in row['guard_evidence']
+                 if event['evidence'].get('reason') == 'retained_partition_removed'
+                 and event['evidence'].get('repo_id') == repo_id
+                 and event['evidence'].get('removed_path', '').startswith('data/observations/')
+                 and (cutoff is None or event['at'] <= cutoff)}
+    for name in withdrawn:
+        owners.pop(name, None)
+    if tombstones is not None:
+        tombstones.update(withdrawn)
+    if historical_evidence is not None:
+        historical_evidence.update(immutable_evidence)
     return owners, active_id
 
 
@@ -652,11 +707,29 @@ def _previous_repo_files(settings, store, repo_id, *, as_of=None):
 
 
 def _promotion_retained_files(settings, store, staging_repo, public_repo):
-    retained = {e['path']: e for e in _previous_repo_files(settings, store, staging_repo)}
-    tombstones = set()
-    public_owners, _ = _retained_owners(settings, store, public_repo, tombstones=tombstones)
-    retained.update({name: dict(entry, data_schema_version=manifest['data_schema_version'])
-                     for name, (_, manifest, entry) in public_owners.items()})
+    staging_evidence, public_evidence = {}, {}
+    staging_tombstones, tombstones = set(), set()
+    staging_owners, _ = _retained_owners(
+        settings, store, staging_repo, tombstones=staging_tombstones,
+        historical_evidence=staging_evidence)
+    public_owners, _ = _retained_owners(
+        settings, store, public_repo, tombstones=tombstones,
+        historical_evidence=public_evidence)
+    # Compare full histories before withdrawals can hide contradictory evidence.
+    for name in staging_evidence.keys() | public_evidence.keys():
+        if name in staging_evidence and name in public_evidence:
+            _require(staging_evidence[name] == public_evidence[name],
+                     'immutable_path_conflict')
+    # Immutable withdrawals apply across the union; mutable paths retain the
+    # historical destination-only precedence below.
+    tombstones.update(name for name in staging_tombstones
+                      if name.startswith('data/observations/'))
+    for name, owner in public_owners.items():
+        if name.startswith('data/observations/') and name in staging_owners:
+            _require(staging_owners[name] == owner, 'immutable_path_conflict')
+    combined = {**staging_owners, **public_owners}
+    retained = {name: dict(entry, data_schema_version=manifest['data_schema_version'])
+                for name, (_, manifest, entry) in combined.items()}
     # Destination removals must delete staging keys, not merely omit public keys.
     for name in tombstones:
         retained.pop(name, None)
@@ -664,12 +737,17 @@ def _promotion_retained_files(settings, store, staging_repo, public_repo):
 
 
 def _retained_repair(settings, store, repo_id, warnings):
-    selected, active_id = _retained_owners(settings, store, repo_id)
+    locations = {}
+    selected, active_id = _retained_owners(settings, store, repo_id, repair_locations=locations)
     owners = {name: [owner] for name, owner in selected.items()}
+    # Ownership remains the producer's evidence; physical copies are only repair sources.
+    candidates = {name: values + sorted(
+        (location for location in locations.get(name, []) if location not in values),
+        key=lambda location: location[0]) for name, values in owners.items()}
 
     def repair(name, entries):
         from .releases.hf import PublishError, scan_secret_payload
-        for release_id, manifest, entry in owners.get(name, []):
+        for release_id, manifest, entry in candidates.get(name, []):
             if not any(all(e.get(k) == v for k, v in entry.items()) for e in entries):
                 continue
             try:
@@ -679,11 +757,14 @@ def _retained_repair(settings, store, repo_id, warnings):
                 path = snapshot / relative_path(name)
                 _safe_path(path)
                 payload = path.read_bytes()
+                _require(hashlib.sha256(payload).hexdigest() == entry['sha256'], 'repair_digest_mismatch')
                 scan_secret_payload(payload, name, _loaded_secrets(settings, hf=True),
                                     schema_version=manifest["data_schema_version"])
                 return payload
             except Exception:
                 continue
+        if name.startswith('data/observations/') and owners.get(name):
+            raise PublishError('immutable_retained_partition_unrecoverable')
         if any(release_id == active_id for release_id, _, _ in owners.get(name, [])):
             raise PublishError("active_retained_partition_unrecoverable")
         for release_id, _, _ in owners.get(name, []):
@@ -788,6 +869,7 @@ def publish(settings, *, release_id, dry_run=False, api=None):
             raise PipelineError("interrupted_post_upload_quarantined")
         _state(store, release_id, "validated")
         m = _read_manifest(_manifest_path(settings, release_id))
+        _require(m['schema_version'] == 'kapa-runtime-release/1', 'cumulative_publication_not_integrated')
         built = next(e["evidence"] for e in existing["guard_evidence"] if e["state"] == "validated")
         try:
             _require(manifest_digest(m) == built.get("validated_manifest_sha256")
@@ -999,7 +1081,13 @@ def _require_target_served_at_head(settings, store, publisher, manifest):
         from .releases.hf import scan_secret_payload
         import pyarrow as pa
         head, remote = publisher._head_tree()
-        for entry in manifest['files']:
+        from .releases.snapshot import inventory
+        entries = inventory(manifest, settings.snapshots_dir / manifest['release_id'])
+        if manifest['schema_version'] == 'kapa-runtime-release/2':
+            tombstones = set()
+            _retained_owners(settings, store, publisher.repo_id, tombstones=tombstones)
+            _require(not tombstones.intersection(e['path'] for e in entries), 'tombstone_resurrection')
+        for entry in entries:
             name = entry['path']
             if not (name.startswith('data/') and name.endswith('.parquet')):
                 continue
@@ -1014,7 +1102,28 @@ def _require_target_served_at_head(settings, store, publisher, manifest):
         raise PipelineError('active_target_not_served_at_head') from None
 
 
-def activate(settings, *, release_id, api=None):
+def _prepare_cumulative(settings, store, manifest, api, enabled):
+    if manifest['schema_version'] != 'kapa-runtime-release/2':
+        return
+    _require(enabled is True, 'cumulative_snapshots_disabled')
+    from .releases.snapshot import inventory, materialize
+    root = settings.snapshots_dir / manifest['release_id']
+    publisher = _publisher(settings, api, read_only=True)
+    ref = next(r for r in manifest['hugging_face_revisions'] if r['repo_id'] == publisher.repo_id)
+    def load(name):
+        return download_bytes(publisher.api, publisher.repo_id, name, revision=ref['commit_sha'],
+            cache_dir=settings.cache_dir / manifest['release_id'], token=publisher._read_token)
+    if not root.exists():
+        materialize(manifest, root, load, enabled=True)
+    paths = {e['path'] for e in inventory(manifest, root)}
+    removed = {e['evidence'].get('removed_path') for row in store.list_releases()
+               for e in row['guard_evidence']
+               if e['evidence'].get('reason') == 'retained_partition_removed'
+               and e['evidence'].get('repo_id') == publisher.repo_id}
+    _require(not paths.intersection(removed), 'tombstone_resurrection')
+
+
+def activate(settings, *, release_id, api=None, cumulative=False):
     with StateStore(settings.state_db) as store:
         _restore_public(settings, store, release_id, api)
         row = store.get_release(release_id)
@@ -1022,6 +1131,7 @@ def activate(settings, *, release_id, api=None):
         path = _manifest_path(settings, release_id)
         m = _trusted_published_manifest(settings, store, release_id)
         _verify_workspace(settings, m)
+        _prepare_cumulative(settings, store, m, api, cumulative)
         if settings.active_manifest.exists():
             pointer = _read_manifest(settings.active_manifest)
             _trusted_published_manifest(settings, store, pointer["release_id"], path=settings.active_manifest)
@@ -1033,7 +1143,8 @@ def activate(settings, *, release_id, api=None):
                                                                       as_of=release_id), evidence_store=store)
         _require_target_served_at_head(settings, store, publisher, m)
         _verify_workspace(settings, m)
-        replace_active(path, settings.active_manifest, report)
+        replace_active(path, settings.active_manifest, report,
+                       snapshot_root=settings.snapshots_dir / release_id)
         if row['state'] == 'published':
             store.transition_release(release_id, "active", {
                 "repo_revisions_verified": report.passed and bool(m["github_revisions"]),
@@ -1041,7 +1152,7 @@ def activate(settings, *, release_id, api=None):
         return {"release_id": release_id, "state": "active"}
 
 
-def rollback(settings, *, api=None):
+def rollback(settings, *, api=None, cumulative=False):
     with StateStore(settings.state_db) as store:
         _restore_public(settings, store, "", api)
         previous_path = settings.active_manifest.with_name("previous.json")
@@ -1049,6 +1160,7 @@ def rollback(settings, *, api=None):
         previous = _trusted_published_manifest(settings, store, pointer["release_id"], path=previous_path)
         _id(previous["release_id"])
         _verify_workspace(settings, previous)
+        _prepare_cumulative(settings, store, previous, api, cumulative)
         _verify_local(settings.snapshots_dir / previous["release_id"], previous)
         row = store.get_release(previous["release_id"])
         _require(row is not None and row["state"] in ("published", "active"), "rollback_state_mismatch")
@@ -1061,7 +1173,8 @@ def rollback(settings, *, api=None):
         _require(report.passed, "rollback_remote_verification_failed")
         _require_target_served_at_head(settings, store, publisher, previous)
         _verify_workspace(settings, previous)
-        restore_previous(settings.active_manifest, report)
+        restore_previous(settings.active_manifest, report,
+                         snapshot_root=settings.snapshots_dir / previous['release_id'])
         if row["state"] == "published":
             store.transition_release(previous["release_id"], "active", {
                 "repo_revisions_verified": report.passed,

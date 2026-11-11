@@ -11,7 +11,7 @@
 
 수집 observation → 배포 batch release → 조회 cumulative ACTIVE snapshot을 분리한다. pair P는 `(lawd_code, deal_ymd)`, partition K는 `(lawd_code, deal_ymd, service_id)`다. batch는 정렬·고유한 정확한 pair 집합을 선언하고 각 pair의 sale와 rent 완전 관측을 함께 교체한다. `S_new = S_parent ⊕ batch`: 같은 K는 오른쪽으로 교체하며 상속 partition의 producer와 근거를 보존한다. 정상 zero도 관측이며 재관측은 coverage를 늘리지 않는다. 전체 행 dedup을 하지 않고 관측 안의 multiplicity를 보존한다. 재관측에서 사라진 행은 취소 증거가 아니다.
 
-새 경로는 `data/observations/<observation_id>/asset_type=apartment/transaction_type=.../lawd_code=.../contract_year=YYYY/contract_month=MM/part-NNNNN.parquet`다. 동일 경로 다른 바이트를 거부하는 write-once 검사는 다음 단계에서 구현한다. bootstrap은 검증된 기존 경로를 그대로 선택할 수 있다. raw는 로컬에 남는다.
+새 경로는 `data/observations/<observation_id>/asset_type=apartment/transaction_type=.../lawd_code=.../contract_year=YYYY/contract_month=MM/part-NNNNN.parquet`다. 2단계의 opt-in `snapshot.write_once`는 동일 경로 다른 바이트를 거부한다. bootstrap은 검증된 기존 경로를 그대로 선택할 수 있다. raw는 로컬에 남는다.
 
 논리 K 선택과 물리 경로 소유권은 다르다. 선택 해제는 tombstone이 아니다. 과거 관측은 retained inventory로 영구 보존하며, 기본 inventory에는 current 선택 파일과 metadata만 포함한다. staging/public 소유권 합집합 **이후** tombstone 적용을 유지하며 manifest 참조가 삭제 파일을 부활시키지 않는다. 복구 사본이 없으면 게시 중지, 제거는 명시적 withdrawal로 한다.
 
@@ -60,6 +60,6 @@ code.go.kr 전체자료의 active 10자리 코드에서 5자리 prefix를 생성
 
 ## 비목표와 다음 단계
 
-이 PR은 계약·순수 합성 함수·fixture만 제공한다. pipeline, ledger migration, write-once writer, origin trust 검증, parent CAS, HF delta/spool, quota scheduler, CLI, query/MCP, bootstrap 실행 및 activation은 변경하지 않는다. 실제 수집·네트워크·게시도 하지 않는다.
+2단계는 opt-in snapshot 조립, ledger publication digest 기반 origin 검증, parent 비교, write-once, SQLite schema 3(parent/batch members/partition evidence), 전체 선택 inventory 검증 및 v2 activation/rollback 지원을 추가한다. 기본 v1 CLI는 유지한다. v2 게시 orchestration/final envelope와 게시 직전 check_parent 연결은 미완료이며 v1 publish에 v2를 전달하지 않는다. HF delta/spool, quota scheduler, CLI, query/MCP, bootstrap 실행은 후속 단계다. 실제 수집·네트워크·게시도 하지 않는다.
 
-다음 단계는 published 직전 parent digest 재확인(변경되면 자동 병합하지 않고 재조립), published-but-not-active 차단, 신뢰 origin 결속, 전체 선택 inventory materialize 후 atomic ACTIVE 교체다. 미해결 journal·commit 결과 불명·head/visibility drift는 전역 중지 사유다. local rollback과 public current rollback은 별개이며 기존 head 제공·workspace guard를 유지한다. 이후 quota/jobs, delta/spool, manifest-aware query, migration과 수동 smoke 순으로 통합한다.
+현재 조립 API는 parent digest 비교와 published-but-not-active 차단을 제공한다. 다음 통합 작업은 v2 게시 직전에 이 guard를 다시 호출하고 end-to-end fake-HF 검증을 추가하는 것이다. schema 3 migration은 첫 누적 snapshot 기록 때만 실행하여 기본 v1 장부 동작을 유지한다. 미해결 journal·commit 결과 불명·head/visibility drift는 전역 중지 사유다. local rollback과 public current rollback은 별개이며 기존 head 제공·workspace guard를 유지한다. 이후 quota/jobs, delta/spool, manifest-aware query, migration과 수동 smoke 순으로 통합한다.

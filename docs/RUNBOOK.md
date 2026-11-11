@@ -5,6 +5,14 @@
 
 관리자는 GitHub private vulnerability reporting을 활성화하고 [SECURITY.md](../SECURITY.md)의 비공개 신고 경로를 확인한다. `.github/workflows/traffic.yml`은 조직 템플릿을 그대로 사용하며 기본 브랜치 `main`에 반영된 뒤 매일 실행된다. 조직 reusable workflow는 `main`을 별도 `traffic` 집계 브랜치에 동기화하고 방문·clone 집계를 기록한다. 관리자는 해당 저장소에 필요한 권한의 `TRAFFIC_TOKEN` Actions secret을 제공해야 한다. 토큰 값은 코드·문서·로그에 넣지 않는다. README 배지는 첫 집계 전에는 표시되지 않을 수 있다. 코드 변경만으로 이 GitHub 설정이나 실제 가시성이 바뀌지는 않는다.
 
+## 누적 snapshot 개발 API (2단계)
+
+기본 v1 CLI 경로는 유지한다. `releases.snapshot.build_snapshot(..., enabled=True)`만 누적 조립을 허용하며 StateStore writer lock 안에서 ACTIVE parent digest와 published-but-not-active/journal 차단을 확인한다. 게시 어댑터는 커밋 직전에 `check_parent`를 다시 호출해야 한다. 현재 v1 publish CLI에 v2를 전달하지 않는다. v2 publication orchestration/final envelope는 아직 통합하지 않았다.
+
+`assemble_snapshot`의 trusted digest map은 사용자 manifest의 자기 주장 대신 장부 published digest에서만 구성한다. legacy bootstrap 순수 API는 검증된 partition evidence를 명시적으로 요구한다. `write_once`는 관측 경로 충돌을 거부하며 실패한 부분 파일은 자동 덮어쓰지 않는다. `materialize(..., enabled=True)`는 선택 inventory를 새 디렉터리에 설치하고 검증한다. 실패 디렉터리는 자동 재사용하지 않고 운영자가 원인을 조사한다.
+
+신뢰된 v2 published manifest에 대해 Python `pipeline.activate/rollback(..., cumulative=True)`는 전체 선택 inventory, 고정 remote SHA, 현재 head 제공, workspace pin과 tombstone을 확인한 뒤 기존 atomic pointer 교체를 사용한다. 새 snapshot이 기존 파일을 선택 해제해도 archive 삭제가 아니다. 복구 가능한 동일 digest 사본이 없으면 observation 보존을 포기하지 않고 중지한다. SQLite schema 3은 parent, batch members, partition evidence만 추가한다. scheduler/jobs/quota, HF delta/spool, query와 bootstrap 명령은 후속 단계다.
+
 ## 사전 조건
 
 Python 3.12와 `uv sync --locked --extra test`가 필요하다. 실제 호출은 운영자만 수행한다. Git 작업 트리가 깨끗한 커밋에서 테스트한 뒤 build한다. 자격증명은 설정의 상대 경로 또는 환경변수로 제공하고 출력·커밋하지 않는다. **HF 기본값은 private이다. 사용자 정책(2026-11-10)에 따라 market 역할만 명시적 public 설정이 가능하다.** GitHub 코드는 공개 대상이며 운영 데이터·자격증명은 저장소 밖의 로컬 `data_root` 및 자격증명 경로에 둔다. HF `pacappkor/kapa-market-data`는 public, `pacappkor/kapa-market-data-staging`은 private 검증용이다(2026-11-11 정책). knowledge-index, evals, property, matters는 private을 유지하고 raw·로그는 업로드하지 않는다. 실제 가시성과 설정이 다르면 어느 방향으로도 자동 변경하지 않고 거부한다.
