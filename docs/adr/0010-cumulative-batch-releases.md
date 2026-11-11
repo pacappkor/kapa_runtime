@@ -30,6 +30,10 @@
 
 Shard는 `kapa-runtime-coverage/1`, `license`, `selected_partitions`, `coverage`만 가진 평면 문서다. root와 shard의 K 목록은 합쳐서 검증하므로 중복 K·coverage를 거부한다. 각 shard 안에서도 pair와 coverage 관계가 완전해야 하므로 pair를 쪼개지 않는다. 시도·연도별 분할을 권장하지만 지리 grouping 자체는 이 단계의 형식 제약이 아니다. shard 안에서 다른 shard나 parent를 따라갈 수 없다(순환 참조 불가능). `entries`는 selected partition 수와 네 coverage 목록 길이의 합이다.
 
+Root inline 데이터도 하나의 block으로 취급한다. 각 block은 병합 **전에** selected K = observed K, 완전 sale+rent pair, zero K = rows가 0인 선택 partition K (status도 zero), `not_collected = declared − observed`, `complete = not not_collected`를 독립 검증한다. batch 전체 포함·producer/origin 결속·파일 중복 검사는 병합 후 기존 전역 검증을 유지한다.
+
+Pair의 소유 block은 `declared ∪ observed`로 정하며 root와 모든 shard 사이에서 유일해야 한다. 선언된 관측 pair의 declared/observed/selected/zero는 같은 block에 둔다. 아직 미수집인 pair는 declared와 not_collected를 같은 block에 두며 partition은 없다. 선언 밖 상속 observed pair는 허용하지만 다른 block에 그 pair의 declared/not_collected를 둘 수 없다. 따라서 coverage만 가진 미수집 block은 가능하고, 다른 block의 관측으로 local gap을 메우거나 pair 기록을 분산하는 방식은 금지한다. 전역 합집합만 검증하는 대안은 서로 바뀐 shard 관계를 숨기므로 채택하지 않는다.
+
 상한은 root 및 **각 shard 16 MiB**, shard 최대 1,024개, shard당 합계 4,096 entries, 전체 root+shard 합계 250,000 entries다. 파일/목록도 250,000개 상한을 적용한다. 무한 metadata 한도 확대 대신 향후 측정 후 계약 개정한다. resolver는 loader가 반환한 bytes 길이·SHA-256·entry count를 검사하고 명시된 경로만 한 번씩 요청한다. loader는 안전한 파일 경계와 고정 revision에서 bounded read를 보장해야 한다. glob, 네트워크, parent 자동 조회는 없다.
 
 `validate_manifest`는 root 구조 검증이다. shard가 있으면 완전한 cross-shard 검증은 `resolve_snapshot`/`resolve_snapshot_inventory` 성공을 요구한다. v1 inventory는 기존 files 그대로다. v2 inventory는 선택 current data + root metadata를 path 순서로 반환한다. `resolve_snapshot`의 펼친 결과는 작업용 view이지 다시 직렬화할 root가 아니다.

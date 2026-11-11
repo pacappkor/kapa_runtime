@@ -120,12 +120,18 @@ def coverage(c):
     return sets
 
 
-def validate_selection(m, partitions, cov):
+def validate_block(partitions, cov):
+    """Validate one pair-atomic root/shard block, without global batch rules."""
     keys = ordered(partitions, partition)
     complete_pairs(keys)
     sets = coverage(cov)
     require(keys == sets["observed"], "Selected/observed mismatch")
     require(sets["zero"] == {key(p) for p in partitions if p["status"] == "zero"}, "Zero mismatch")
+    return keys, sets
+
+
+def validate_selection(m, partitions, cov):
+    keys, sets = validate_block(partitions, cov)
     batch = {(*pair(p), s) for p in m["batch_scope"]["declared_pairs"] for s in SERVICES}
     require(batch <= keys and batch <= sets["declared"], "Incomplete batch")
     for p in partitions:
@@ -160,8 +166,7 @@ def validate_root(m):
         return pair(p)
     ordered(scope["declared_pairs"], declared, MAX_BATCH_PAIRS)
     require(bool(scope["declared_pairs"]), "Empty batch")
-    ordered(m["selected_partitions"], partition)
-    coverage(m["coverage"])
+    validate_block(m["selected_partitions"], m["coverage"])
     def ref(r):
         require(isinstance(r, dict) and set(r) == {"path", "sha256", "entries"}, "Invalid shard reference")
         digest(r["sha256"])
@@ -189,6 +194,7 @@ def resolve_snapshot(manifest, loader):
         return m
     partitions = list(m["selected_partitions"])
     cov = {n: list(m["coverage"][n]) for n in COVERAGE}
+    owned_pairs = {pair(v) for n in ("declared", "observed") for v in cov[n]}
     for ref in m["coverage_shards"]:
         payload = loader(ref["path"])
         require(isinstance(payload, bytes) and len(payload) <= MAX_METADATA_BYTES, "Metadata limit exceeded")
@@ -201,7 +207,10 @@ def resolve_snapshot(manifest, loader):
                 and shard["schema_version"] == "kapa-runtime-coverage/1"
                 and shard["license"] == "SPDX-License-Identifier: GPL-3.0-only", "Invalid flat shard")
         ordered(shard["selected_partitions"], partition, MAX_SHARD_ENTRIES)
-        coverage(shard["coverage"])
+        _, sets = validate_block(shard["selected_partitions"], shard["coverage"])
+        shard_pairs = {k[:2] for k in sets["declared"] | sets["observed"]}
+        require(owned_pairs.isdisjoint(shard_pairs), "Pair must belong to a unique block")
+        owned_pairs.update(shard_pairs)
         count = len(shard["selected_partitions"]) + sum(len(shard["coverage"][n]) for n in COVERAGE)
         require(count == ref["entries"], "Shard entry count mismatch")
         partitions.extend(shard["selected_partitions"])

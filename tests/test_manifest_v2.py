@@ -135,8 +135,83 @@ def test_hash_count_duplicate_and_cycle_rejection():
             resolve_snapshot_inventory(m, lambda _: payload)
     m, payload = sharded()
     m["selected_partitions"] = partitions()
+    m["coverage"] = v2.coverage_for_partitions(partitions(), keys(partitions()))
     with pytest.raises(ManifestError, match="unique"):
         resolve_snapshot_inventory(m, lambda _: payload)
+
+
+def block(parts, declared=None):
+    return dict(license="SPDX-License-Identifier: GPL-3.0-only",
+                schema_version="kapa-runtime-coverage/1", selected_partitions=parts,
+                coverage=v2.coverage_for_partitions(parts, keys(parts) if declared is None else declared))
+
+
+def with_blocks(blocks, inline=False):
+    m = root()
+    m["batch_scope"]["declared_pairs"].append({"lawd_code": "26110", "deal_ymd": "202510"})
+    m.update(selected_partitions=[], coverage=v2.coverage_for_partitions([], []), coverage_shards=[])
+    if inline:
+        m.update(selected_partitions=blocks[0]["selected_partitions"], coverage=blocks[0]["coverage"])
+        blocks = blocks[1:]
+    payloads = {}
+    for b in blocks:
+        payload = json.dumps(b, sort_keys=True).encode()
+        sha = hashlib.sha256(payload).hexdigest()
+        path = f"manifests/coverage/{sha}.json"
+        payloads[path] = payload
+        entries = len(b["selected_partitions"]) + sum(len(b["coverage"][n]) for n in v2.COVERAGE)
+        m["coverage_shards"].append(dict(path=path, sha256=sha, entries=entries))
+    m["coverage_shards"].sort(key=lambda r: r["path"])
+    return m, payloads.__getitem__
+
+
+@pytest.mark.parametrize("inline", [False, True], ids=["shards", "root-inline"])
+@pytest.mark.parametrize("case, error", [
+    ("swapped-pairs", "Selected/observed"),
+    ("split-pair", "Both services"),
+    ("zero-mismatch", "Zero mismatch"),
+    ("detached-coverage", "Selected/observed"),
+    ("detached-declared", "unique block"),
+])
+def test_block_inconsistency_rejected(case, error, inline):
+    a, b = partitions(), partitions(region="26110", zero=True)
+    blocks = [block(a), block(b)]
+    if case == "swapped-pairs":
+        blocks[0]["coverage"], blocks[1]["coverage"] = blocks[1]["coverage"], blocks[0]["coverage"]
+    elif case == "split-pair":
+        blocks[0]["selected_partitions"] = [a[0], b[0]]
+        blocks[1]["selected_partitions"] = [a[1], b[1]]
+    elif case == "zero-mismatch":
+        # Both coverage blocks are valid in isolation, but zero belongs to B,
+        # not A. Neither block may borrow another block's row/status evidence.
+        blocks[0]["coverage"]["zero"] = keys(a)
+        blocks[1]["coverage"]["zero"] = []
+    elif case == "detached-coverage":
+        blocks = [block(a + b), block([], [])]
+        blocks[1]["coverage"] = blocks[0]["coverage"]
+        blocks[0]["coverage"] = v2.coverage_for_partitions([], [])
+    else:
+        # Each block is valid alone, but declaration/gap and observation of A
+        # cannot have different owners (even though their K lists differ).
+        blocks = [block(a, []), block(b, keys(a + b))]
+    m, loader = with_blocks(blocks, inline)
+    with pytest.raises(ManifestError, match=error):
+        resolve_snapshot_inventory(m, loader)
+
+
+@pytest.mark.parametrize("inline", [False, True])
+def test_independent_pair_blocks_and_local_gaps(inline):
+    a, b = partitions(), partitions(region="26110", zero=True)
+    gap = partitions(region="41110")
+    # An inherited-style observed pair need not be declared locally; here both
+    # current batch pairs are declared, and an unobserved pair has one owner.
+    blocks = [block(a), block(b), block([], keys(gap))]
+    m, loader = with_blocks(blocks, inline)
+    resolved = v2.resolve_snapshot(m, loader)
+    assert resolved["selected_partitions"] == a + b
+    assert resolved["coverage"]["zero"] == keys(b)
+    assert resolved["coverage"]["not_collected"] == keys(gap)
+    assert not resolved["coverage"]["complete"]
 
 
 def test_assembly_a_b_c_and_zero():
