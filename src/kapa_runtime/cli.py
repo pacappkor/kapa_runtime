@@ -50,7 +50,7 @@ def main(argv=None) -> int:
         reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(prog="kapa-runtime")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("diagnose", "collect", "build", "publish", "activate", "rollback", "query", "attest-legacy"):
+    for name in ("diagnose", "collect", "build", "publish", "activate", "rollback", "query", "attest-legacy", "plan", "collect-batch"):
         command = commands.add_parser(name)
         command.add_argument("--config", type=Path)
         if name in ("build", "publish", "activate", "attest-legacy"):
@@ -60,6 +60,9 @@ def main(argv=None) -> int:
             command.add_argument("--lawd-code", required=True)
             command.add_argument("--deal-ymd", required=True)
             command.add_argument("--release-id", required=True)
+        if name == "collect-batch":
+            command.add_argument("--job-id", required=True)
+            command.add_argument("--dry-run", action="store_true")
         if name == "publish":
             command.add_argument("--dry-run", action="store_true")
         if name == "query":
@@ -84,14 +87,26 @@ def main(argv=None) -> int:
             output = {"credentials": diagnostics}
             code = 0 if all(d["status"] == "ok" for d in diagnostics) else 1
         else:
-            if name == "query":
+            if name in ("plan", "collect-batch"):
+                from . import accumulation
+                output = getattr(accumulation, name.replace("-", "_"))(settings, **args)
+            elif name == "query":
                 controls = {k: args.pop(k) for k in ("release_id", "limit", "cursor")}
                 with redirect_stdout(sys.stderr):
                     output = pipeline.query(settings, filters={k: v for k, v in args.items() if v is not None}, **controls)
             else:
                 with redirect_stdout(sys.stderr):
                     output = getattr(pipeline, name.replace("-", "_"))(settings, **args)
-            code = 1 if output.get("state") in ("failed", "partial", "quarantined") else 0
+            if name == "collect-batch":
+                state = output.get("state")
+                if state == "paused":
+                    code = 3
+                elif state in ("validated", "empty") or (args.get("dry_run") and state == "planned"):
+                    code = 0
+                else:
+                    code = 1
+            else:
+                code = 1 if output.get("state") in ("failed", "partial", "quarantined", "blocked") else 0
     except ConfigurationError:
         output, code = {"status": "error", "error_code": "configuration_error"}, 2
     except pipeline.PipelineError as exc:
@@ -102,7 +117,7 @@ def main(argv=None) -> int:
         # Never serialize arbitrary exception text, requests, API bodies or paths.
         output, code = {"status": "error", "error_code": "operation_failed"}, 1
     encoded = json.dumps(output, ensure_ascii=False, default=str)
-    if name != "diagnose" and "settings" in locals():
+    if name not in ("diagnose", "plan", "collect-batch") and "settings" in locals():
         try:
             secrets = []
             for alias in ENV_NAMES:

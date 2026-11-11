@@ -237,7 +237,15 @@ def resolve_snapshot(manifest, loader):
         owned_pairs.update(shard_pairs)
         count = len(shard["selected_partitions"]) + sum(len(shard["coverage"][n]) for n in COVERAGE)
         require(count == ref["entries"], "Shard entry count mismatch")
-        partitions.extend(shard["selected_partitions"])
+        # Reused immutable shards retain their producer's self-origin markers.
+        # Assembly records the verified publication bindings in the child root;
+        # like other origin digests, these are evidence, not standalone trust.
+        for part in shard["selected_partitions"]:
+            if part["origin_digest"] is None and part["producer_release_id"] != m["release_id"]:
+                bound = m["quality"].get("inherited_origins", {}).get(part["producer_release_id"])
+                digest(bound)
+                part = {**part, "origin_digest": bound}
+            partitions.append(part)
         for n in COVERAGE:
             cov[n].extend(shard["coverage"][n])
     partitions.sort(key=key)

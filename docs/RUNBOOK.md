@@ -394,6 +394,57 @@ zero는 수집 완료이며 미수집 gap과 구분한다. 현재 선택만 조�
 origin 검증, tombstone-after-union, write-once 경로, atomic activation 및
 published-but-not-active 차단을 통합·검증하기 전에는 누적 운영을 시작하지 않는다.
 
+## 누적 수집 job (3b, opt-in)
+
+`plan --config runtime.json` 또는 `collect-batch --config runtime.json --job-id day-20261112 --dry-run`은
+네트워크와 credential 접근 없이 다음 계획·서비스별 보수적 예약량을 표시한다. 일관된
+ledger 읽기를 위해 기존 writer lock을 취하며 opt-in schema 4를 생성한다. 기본 v1 호출은
+schema 2를 유지한다. 이미 schema 3/4인 DB는 downgrade하지 않는다.
+
+실수집은 **운영자 smoke test 전 금지**다. 검증된 누적 v2 ACTIVE와 해당 로컬 snapshot,
+producer 원본 manifest 및 publication ledger가 필요하다. v1 ACTIVE에는 `bootstrap_required`를
+반환한다. legacy bootstrap은 후속 단계다. 실제 API 제공 시작월, city aggregate 의미,
+키·승인·schema·약관을 운영자가 smoke로 확인한 뒤에만 operator-policy.json의
+`accumulation_smoke_verified: true`를 설정한다. 기존 서비스 `max_requests`(3의 배수,
+3~150), terms_reviewed/terms_basis, fixture_evidence가 여전히 필수다.
+
+실행 명령은 `collect-batch --config runtime.json --job-id day-20261112`다. 한 job은 최대
+60 pair의 계획을 고정하고 각 pair 시작 전에 sale/rent **둘 다** runs ledger에 원자적으로
+예약한다. 각 요청 직전 Seoul 날짜를 확인하여 자정에는 두 서비스를 다시 선예약한다.
+미사용 예약은 환급하지 않는다. 서비스별 9,000/day 및 더 작은 operator/provider 한도를
+준수한다. HTTP 429는 이 경로에서 자동 재시도하지 않는다. v1 adapter 기본 동작은 유지한다.
+
+`collect-batch` 종료 코드는 다음과 같다. `0`은 `validated`(로컬 build 완료), `empty`(수집 대상 없음),
+또는 명시적 `--dry-run`의 `planned`만 의미한다. `3`은 `paused`이며 자동화는 같은 job-id로
+재개를 예약해야 한다. `1`은 `blocked`/오류 및 그 밖의 미완료·알 수 없는 상태이고,
+`2`는 설정 오류 또는 CLI 인자 오류다. 성공 코드는 게시나 ACTIVE 전환을 의미하지 않는다.
+각 서비스의 `max_requests`는 생략할 수 없는 정수(3~150, 3의 배수)이며 기본값으로 대체하지 않는다.
+실수집 전에 `terms_basis`가 공백 제거 후 비어 있지 않은 문자열인지 검증한다.
+job-id는 ledger 기록·경로 사용 전에 설정된 모든 secret으로 검사하며 일치하면
+값을 노출하지 않고 `identifier_scan_failed`로 거부한다.
+
+재개는 반드시 같은 job-id를 사용한다. page 중단은 새 attempt/run/observation으로 page 1부터
+시작하며 성공한 sibling은 page hash·schema·행수·정규화 replay·secret scan 후 재사용한다.
+partial을 합치지 않는다. `paused`는 quota/provider 중단이며 다음 날 같은 job을 재개한다.
+`blocked`는 auth/schema/security/verification 또는 partition/batch cap 중단이다. 다른 job-id나
+날짜로 우회할 수 없으며 **운영자 조사 전 DB state를 수정하지 않는다**. 자동 unblock CLI는 없다.
+프로세스 강제 종료로 남은 `.lock`은 자동 탈취하지 않는다. 운영자는 해당 writer가 종료했음을
+확인하고 백업·원인 조사 후에만 lock을 제거한다. URL/키/payload/traceback은 출력하지 않는다.
+
+완전 pair만 data_root/accumulation의 write-once observation에서 선택하여 cumulative snapshot을
+만든다. 변경 Parquet 합계 512 MiB를 넘으면 게시 후보를 만들지 않고 중지한다(자동 분할 없음).
+로컬 원시 XML은 보존하되 snapshot에는 포함하지 않는다. 결과 `validated`는 로컬 build 완료일
+뿐 publication/ACTIVE 전환이 아니다. 결과는 snapshots/<job-id> 및 manifests/<job-id>.json에 있다.
+**기존 v1 publish에 넣지 않는다.** Step 4는 job built→게시 완료 lifecycle, 게시 직전 parent 재검사와
+publication ledger 전이를 통합해야 한다. 그 전에는 built job이 새 job 시작을 차단한다.
+중간 materialization 디렉터리가 불완전하면 재개가 fail-closed되므로 운영자 복구가 필요하다.
+
+runtime config `exclude_parent_city_aggregates`는 기본 true다. committed LAWD 표에서 끝자리 0인
+시 이름과 같은 앞 4자리·시 이름 prefix를 가진 하위 구가 존재하면 시 집계만 제외한다
+(41110 제외, 41111/41113 유지; 36110 유지). false로 전체 active 표를 쓸 수 있다.
+**잠정 RTMS 정책이며 operator smoke 대기 중**이다. 원본 표·provenance는 수정하지 않고 두 파일
+digest, 이 flag, policy digest, parser version 및 plan digest를 job에 결속한다.
+
 ## Cumulative ACTIVE query and coverage (step 5)
 
 Install the optional server with `uv sync --locked --extra test --extra mcp`.

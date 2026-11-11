@@ -64,6 +64,26 @@ code.go.kr 전체자료의 active 10자리 코드에서 5자리 prefix를 생성
 
 현재 조립 API는 parent digest 비교와 published-but-not-active 차단을 제공한다. 다음 통합 작업은 v2 게시 직전에 이 guard를 다시 호출하고 end-to-end fake-HF 검증을 추가하는 것이다. schema 3 migration은 첫 누적 snapshot 기록 때만 실행하여 기본 v1 장부 동작을 유지한다. 미해결 journal·commit 결과 불명·head/visibility drift는 전역 중지 사유다. local rollback과 public current rollback은 별개이며 기존 head 제공·workspace guard를 유지한다. 이후 quota/jobs, delta/spool, manifest-aware query, migration과 수동 smoke 순으로 통합한다.
 
+### 3b 실행 계층 (issue #5)
+
+`accumulation.py`는 기존 StateStore writer lock과 runs 기반 Seoul 일일 quota를 재사용한다.
+collection_jobs/work_items/attempts는 명시적 schema 4 migration으로만 생성한다. plan/reference/
+policy/parser binding, 각 시도의 observation FK, page/hash 및 terminal state를 기록한다.
+두 서비스 예약은 하나의 SQLite transaction이며 9,000/service/day와 낮은 기존 한도를 적용한다.
+midnight 요청 전 재예약하며 성공 sibling은 replay 검증 후 재사용한다. 실패/partial 합산은 금지한다.
+auth/schema/security/verification은 persistent blocked job으로 모든 새 job을 차단한다.
+
+Immutable observation writer와 build_snapshot/check_parent를 이용해 로컬 누적 snapshot까지만
+진행한다. 전체 계획을 하나의 batch(60 pair, 변경 Parquet 512 MiB)로 동결하며 cap 초과는
+자동 분할 대신 fail-closed한다. 빌드 완료 job의 다음 lifecycle은 step 4가 담당한다.
+legacy parent는 bootstrap evidence를 추정하지 않고 거부한다. 불완전 materialization 복구와
+blocked 해제는 자동화하지 않는다. 실제 운영은 operator smoke와 step 4 게시 통합 전 금지한다.
+
+LAWD city aggregate exclusion은 기본 true의 config flag다. active city 이름 prefix와 코드 앞
+4자리가 일치하는 하위 gu가 있으면 끝자리 0의 city aggregate를 제외한다. committed 원본과
+provenance는 그대로 보존하고 digest에 결속한다. MOLIT sigungu 의미에 대한 잠정 결정이며
+실제 제공 범위·중복 방지 효과는 operator smoke로 검증해야 한다.
+
 ### 5 query/MCP implementation (issue #7)
 
 The ACTIVE reader now resolves v2 current inventory through the common resolver,

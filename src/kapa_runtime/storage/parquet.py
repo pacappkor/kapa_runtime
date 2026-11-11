@@ -60,11 +60,16 @@ class WrittenFile:
 
 def _safe_path(path: Path) -> None:
     """Refuse links, including Windows junction/reparse point ancestors."""
+    import stat
     for part in (path, *path.parents):
-        if part.is_symlink() or (part.exists() and getattr(part, "is_junction", lambda: False)()):
+        if part.is_symlink():
             raise ValueError("linked storage paths are forbidden")
-        if part.exists() and getattr(part.stat(), "st_file_attributes", 0) & 0x400:
-            raise ValueError("reparse storage paths are forbidden")
+        try:
+            info = part.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise ValueError("linked or reparse storage paths are forbidden")
 
 
 def _row(record: TransactionRecord) -> dict:

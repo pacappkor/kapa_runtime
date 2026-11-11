@@ -138,7 +138,7 @@ def _retry_delay(value: str | None, attempt: int) -> float:
     return min(2 ** attempt + random.uniform(0, 0.25), 8)
 
 
-def _fetch(client, url, params, budget, sleep, before_request):
+def _fetch(client, url, params, budget, sleep, before_request, stop_on_quota=False):
     for attempt in range(3):
         retry_after = None
         transient = False
@@ -150,6 +150,8 @@ def _fetch(client, url, params, budget, sleep, before_request):
                     raise AuthenticationError("authentication_error")
                 if 300 <= response.status_code < 400:
                     raise ProviderError("redirect_refused")
+                if response.status_code == 429 and stop_on_quota:
+                    raise ProviderError("quota_exceeded")
                 if response.status_code == 429 or 500 <= response.status_code < 600:
                     transient = True
                     retry_after = response.headers.get("Retry-After")
@@ -178,7 +180,8 @@ def _fetch(client, url, params, budget, sleep, before_request):
 def collect(spec, secret, *, lawd_code: str, deal_ymd: str, client: httpx.Client,
             run_id: str, page_size: int = 1000, max_pages: int = 50,
             max_bytes: int = 5_000_000, sleep: Callable[[float], None] = time.sleep,
-            before_request: Callable[[], None] = lambda: None) -> CollectionResult:
+            before_request: Callable[[], None] = lambda: None,
+            stop_on_quota: bool = False) -> CollectionResult:
     """Collect one region/month. Operational failures become failure/partial.
 
     Invalid local arguments raise CollectionError. At most 3 attempts per page,
@@ -210,7 +213,7 @@ def collect(spec, secret, *, lawd_code: str, deal_ymd: str, client: httpx.Client
         for page_no in range(1, max_pages + 1):
             payload = _fetch(client, f"https://{spec.host}{spec.path}",
                              {**request, "pageNo": str(page_no), "serviceKey": secret.reveal()},
-                             budget, sleep, before_request)
+                             budget, sleep, before_request, stop_on_quota)
             page, reported_total, size = _parse(payload, secret)
             if page.page_no != page_no:
                 raise ResponseValidationError("missing_or_duplicate_page")

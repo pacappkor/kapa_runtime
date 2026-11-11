@@ -35,7 +35,11 @@ class RuntimeSettings:
 
     trusted_repo_owners: tuple[str, ...] = ()
 
+    exclude_parent_city_aggregates: bool = True
+
     def __post_init__(self):
+        if type(self.exclude_parent_city_aggregates) is not bool:
+            raise ConfigurationError("invalid city aggregate policy")
         if (not isinstance(self.trusted_repo_owners, (list, tuple))
                 or any(not isinstance(owner, str) or not owner.strip() or "\x00" in owner
                        for owner in self.trusted_repo_owners)):
@@ -122,7 +126,8 @@ class RuntimeSettings:
             return cls(workspace, data_root, files, namespace, names, visibilities, staging_names,
                        raw.get("sibling_repos", cls.__dataclass_fields__["sibling_repos"].default),
                        raw.get("required_repos", cls.__dataclass_fields__["required_repos"].default),
-                       raw.get("trusted_repo_owners", ()))
+                       raw.get("trusted_repo_owners", ()),
+                       raw.get("exclude_parent_city_aggregates", True))
         except (OSError, ValueError, TypeError, KeyError, AttributeError):
             raise ConfigurationError("unable to load valid runtime configuration") from None
 

@@ -52,6 +52,8 @@ class Budget:
     sale_requests: int = 9_000
     rent_requests: int = 9_000
     requests_per_pair: int = 150  # 50 pages, three attempts per page per service.
+    sale_requests_per_pair: int = 0  # Zero retains the symmetric default.
+    rent_requests_per_pair: int = 0
     refresh_percent: int = 20
     audit_percent: int = 5
     backfill_percent: int = 75
@@ -63,6 +65,9 @@ class Budget:
             raise ValueError("budget values must be nonnegative integers")
         if not 3 <= self.requests_per_pair <= 150 or self.requests_per_pair % 3:
             raise ValueError("pair reservation must be 3..150 in page units of three")
+        for amount in (self.sale_requests_per_pair, self.rent_requests_per_pair):
+            if amount and (not 3 <= amount <= 150 or amount % 3):
+                raise ValueError("pair reservation must be 3..150 in page units of three")
         if self.batch_cap > 60:
             raise ValueError("batch cap cannot exceed 60")
         if self.refresh_percent + self.audit_percent + self.backfill_percent != 100:
@@ -70,13 +75,13 @@ class Budget:
 
     @property
     def pair_capacity(self) -> int:
-        return min(self.batch_cap, self.sale_requests // self.requests_per_pair,
-                   self.rent_requests // self.requests_per_pair)
+        return min(self.batch_cap, self.sale_requests // (self.sale_requests_per_pair or self.requests_per_pair),
+                   self.rent_requests // (self.rent_requests_per_pair or self.requests_per_pair))
 
     def lane_capacity(self, percent: int) -> int:
         return min(self.pair_capacity,
-                   self.sale_requests * percent // (100 * self.requests_per_pair),
-                   self.rent_requests * percent // (100 * self.requests_per_pair))
+                   self.sale_requests * percent // (100 * (self.sale_requests_per_pair or self.requests_per_pair)),
+                   self.rent_requests * percent // (100 * (self.rent_requests_per_pair or self.requests_per_pair)))
 
 
 @dataclass(frozen=True)
