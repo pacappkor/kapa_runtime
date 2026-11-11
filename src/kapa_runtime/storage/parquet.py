@@ -62,6 +62,8 @@ def _safe_path(path: Path) -> None:
     """Refuse links, including Windows junction/reparse point ancestors."""
     import stat
     for part in (path, *path.parents):
+        if part.is_symlink():
+            raise ValueError("linked storage paths are forbidden")
         try:
             info = part.lstat()
         except FileNotFoundError:
