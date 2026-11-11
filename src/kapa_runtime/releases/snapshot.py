@@ -52,6 +52,34 @@ def check_parent(store, parent, *, active_path):
     require(not store.pending_promotions(), 'Unresolved publication journal')
 
 
+def _owned_pairs(block):
+    return {key(p)[:2] for p in block['selected_partitions']} | {
+        key(p)[:2] for name in v2.COVERAGE for p in block['coverage'][name]}
+
+
+def check_pair_ownership(result, loader):
+    """Reject overlapping root/shard ownership, including gap-only pairs."""
+    owned = _owned_pairs(result)
+    for ref in result.get('coverage_shards', []):
+        pairs = _owned_pairs(json.loads(loader(ref['path'])))
+        require(owned.isdisjoint(pairs), 'Pair must belong to a unique block')
+        owned.update(pairs)
+
+
+def preflight_selection(parent, resolved, items, loader):
+    """Exercise the same block layout before collecting any replacement bytes."""
+    result = copy.deepcopy(resolved)
+    declared = {key(p): {k: p[k] for k in KEY}
+                for p in result['coverage']['declared'] + result['selected_partitions']}
+    for item in items:
+        for service in v2.SERVICES:
+            entry = dict(lawd_code=item['lawd_code'], deal_ymd=item['deal_ymd'], service_id=service)
+            declared[key(entry)] = entry
+    result['coverage']['declared'] = list(declared.values())
+    result['batch_scope'] = {'declared_pairs': items}
+    _sharded_selection(result, parent, loader, {})
+
+
 def _sharded_selection(result, original, loader, shard_payloads):
     """Keep untouched blocks byte-identical; split changed blocks on pair boundaries."""
     selected = {key(p): p for p in result['selected_partitions']}
@@ -61,13 +89,11 @@ def _sharded_selection(result, original, loader, shard_payloads):
     blocks = []
     for ref in original.get('coverage_shards', []):
         block = json.loads(loader(ref['path']))
-        pairs = {key(p)[:2] for p in block['coverage']['declared'] + block['selected_partitions']}
+        pairs = _owned_pairs(block)
         if pairs.isdisjoint(touched):
             refs.append(ref)
-            for p in block['selected_partitions']:
-                selected.pop(key(p), None)
-            for p in block['coverage']['declared']:
-                declared.pop(key(p), None)
+            selected = {k: p for k, p in selected.items() if k[:2] not in pairs}
+            declared = {k: p for k, p in declared.items() if k[:2] not in pairs}
         else:
             blocks.append(pairs)
     blocks.append({k[:2] for k in declared} - set().union(set(), *blocks))
@@ -102,6 +128,7 @@ def _sharded_selection(result, original, loader, shard_payloads):
         emit(chunk)
     result.update(selected_partitions=[], coverage=coverage_for_partitions([], []),
                   coverage_shards=sorted(refs, key=lambda r: r['path']))
+    check_pair_ownership(result, lambda name: shard_payloads[name] if name in shard_payloads else loader(name))
 
 
 def assemble_snapshot(template, parent, batch, *, trusted_digests, origins,
@@ -223,8 +250,8 @@ def materialize(manifest, root, loader, *, enabled=False):
     from ..pipeline import _verify_local
     root = Path(root)
     _safe_path(root)
-    root.mkdir(parents=True, exist_ok=False)
     entries = resolve_snapshot_inventory(manifest, loader)
+    root.mkdir(parents=True, exist_ok=False)
     entries += [dict(path=r['path'], sha256=r['sha256'], rows=0)
                 for r in manifest.get('coverage_shards', [])]
     for entry in entries:

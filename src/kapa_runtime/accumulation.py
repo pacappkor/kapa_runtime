@@ -19,9 +19,9 @@ from .normalization.rtms import normalize
 from .planning import Budget, plan_day
 from .registry import ServiceRegistry
 from .releases.hf import scan_secret_payload
-from .releases.manifest import build_manifest, dump_manifest, manifest_digest, relative_path
+from .releases.manifest import build_manifest, dumps_manifest, manifest_digest, relative_path
 from .releases.manifest_v2 import resolve_snapshot
-from .releases.snapshot import build_snapshot, check_parent, materialize, write_once
+from .releases.snapshot import build_snapshot, check_parent, materialize, preflight_selection, write_once
 from .storage.metadata import read_metadata
 from .storage.parquet import _safe_path, write_partition
 from .storage.state import StateStore, _dump
@@ -110,7 +110,8 @@ def _plan(settings, store, resolved, policy, clock):
         limits.append(min(9000, limit, registry.get(service).quota["daily_limit"]))
     budget = Budget(sale_requests=max(0, limits[0] - store.reserved_requests(SERVICES[0], day)),
                     rent_requests=max(0, limits[1] - store.reserved_requests(SERVICES[1], day)),
-                    requests_per_pair=min(budgets))
+                    requests_per_pair=budgets[0],
+                    sale_requests_per_pair=budgets[0], rent_requests_per_pair=budgets[1])
     coverage = _coverage(resolved, store)
     plan = plan_day(codes, today=datetime.fromisoformat(day).date(), coverage=coverage, budget=budget)
     if not plan.items and budget.pair_capacity == 0:
@@ -125,10 +126,13 @@ def plan(settings, *, clock=lambda: datetime.now(ZoneInfo("Asia/Seoul"))):
     with StateStore(settings.state_db) as store:
         store.migrate_jobs()
         _, resolved, _ = _parent(settings, store)
-        daily, budget, _ = _plan(settings, store, resolved, p._policy(settings), clock)
+        policy = p._policy(settings)
+        daily, budget, _ = _plan(settings, store, resolved, policy, clock)
         return {"state": "planned", "plan": asdict(daily),
-                "reservations_per_service": daily.reserved_requests_per_service,
-                "requests_per_attempt": budget.requests_per_pair}
+                "reservations_per_service": (daily.reserved_requests_per_service
+                    if len({policy["services"][s]["max_requests"] for s in SERVICES}) == 1
+                    else {s: len(daily.items) * policy["services"][s]["max_requests"] for s in SERVICES}),
+                "requests_per_attempt": {s: policy["services"][s]["max_requests"] for s in SERVICES}}
 
 
 def _completed(store, job, code, month):
@@ -140,13 +144,14 @@ def _completed(store, job, code, month):
 def _reserve(store, job, code, month, amount, day, limits=None):
     """Both services or neither, using the existing runs daily reservation ledger."""
     limits = limits or {s: 9000 for s in SERVICES}
-    p._require(all(store.reserved_requests(s, day) + amount <= limits[s] for s in SERVICES), "quota_pause")
+    amounts = amount if isinstance(amount, dict) else {s: amount for s in SERVICES}
+    p._require(all(store.reserved_requests(s, day) + amounts[s] <= limits[s] for s in SERVICES), "quota_pause")
     con = store._connection
     con.execute("BEGIN IMMEDIATE")
     try:
         for service in SERVICES:
             store.record_run(uuid4().hex, service_id=service, quota_day=day,
-                             reserved_requests=amount, daily_limit=limits[service],
+                             reserved_requests=amounts[service], daily_limit=limits[service],
                              job_id=job, lawd_code=code, deal_ymd=month)
         con.execute("COMMIT")
     except BaseException:
@@ -242,6 +247,7 @@ def _save_result(settings, store, result, job, code, month, attempt, secrets):
     p._require(not normalization_warnings, "schema_blocked")
     p._require(len(records) == obs.count and (str(obs.status) == "zero") == (len(records) == 0),
                "verification_failed")
+    _safe_path(root)
     root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=root) as temporary:
         scratch = Path(temporary)
@@ -326,7 +332,15 @@ def _new_job_id(settings, store, parent, job):
             f'SELECT 1 FROM {table} WHERE release_id=? LIMIT 1', (job,)).fetchone() is not None
     for directory, name in ((settings.manifests_dir, job + '.json'),
                             (settings.snapshots_dir, job), (settings.staging_dir, job)):
-        collision |= (directory / name).exists()
+        path = directory / name
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            collision = True
+        p._require(not collision, 'job_id_collision')
+        _safe_path(path)
     p._require(not collision, 'job_id_collision')
 
 
@@ -377,7 +391,7 @@ def collect_batch(settings, *, job_id=None, dry_run=False, client=None,
             p._require(not con.execute("SELECT 1 FROM collection_jobs WHERE state IN ('running','paused','built')").fetchone(),
                        "resume_existing_job_required")
             data = {**binding, "plan": asdict(daily), "plan_digest": digest(asdict(daily)),
-                    "requests_per_attempt": budget.requests_per_pair}
+                    "requests_per_attempt": {s: policy["services"][s]["max_requests"] for s in SERVICES}}
             con.execute("BEGIN IMMEDIATE")
             try:
                 con.execute("INSERT INTO collection_jobs VALUES (?,'running',?)", (job, _dump(data)))
@@ -388,7 +402,11 @@ def collect_batch(settings, *, job_id=None, dry_run=False, client=None,
                 con.execute("ROLLBACK")
                 raise
         _preflight(parent, resolved, data['plan']['items'], policy)
-        amount = data["requests_per_attempt"]
+        preflight_selection(parent, resolved, data['plan']['items'], lambda name: _load(parent_root, name))
+        for path in (settings.manifests_dir / (job + '.json'), settings.snapshots_dir / job,
+                     settings.staging_dir / job, settings.data_root / 'accumulation'):
+            _safe_path(path)
+        amount = {s: policy["services"][s]["max_requests"] for s in SERVICES}
         try:
             registry = ServiceRegistry.load()
             limits = {}
@@ -428,7 +446,7 @@ def collect_batch(settings, *, job_id=None, dry_run=False, client=None,
                                 (attempt, job, code, month, service, run))
                     def perform(http):
                         return adapter.collect(spec, secret, lawd_code=code, deal_ymd=month,
-                            client=http, run_id=run, max_pages=amount // 3, before_request=reserve, stop_on_quota=True)
+                            client=http, run_id=run, max_pages=amount[service] // 3, before_request=reserve, stop_on_quota=True)
                     if client is None:
                         with httpx.Client(timeout=30, follow_redirects=False, trust_env=False) as http:
                             result = perform(http)
@@ -505,10 +523,14 @@ def _freeze(settings, store, job, data, parent, resolved, parent_root, secrets, 
         if name in shard_payloads:
             return shard_payloads[name]
         return _load(root if name in new_paths else parent_root, name)
+    _safe_path(destination)
     if destination.exists():
         p._verify_local(destination, manifest)
     else:
         materialize(manifest, destination, load, enabled=True)
-    dump_manifest(manifest, settings.manifests_dir / (job + ".json"))
+    from .releases.activate import _atomic_write
+    manifest_path = settings.manifests_dir / (job + ".json")
+    _safe_path(manifest_path)
+    _atomic_write(manifest_path, dumps_manifest(manifest).encode("utf-8"))
     store._connection.execute("UPDATE collection_jobs SET state='built' WHERE job_id=?", (job,))
     return {"state": "validated", "pairs": len(parts) // 2, "bytes": total}

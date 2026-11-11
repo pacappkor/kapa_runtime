@@ -465,3 +465,126 @@ def test_sharded_parent_materializes_and_retries(setup):
     assert (setup.snapshots_dir / 'sharded' / name).read_bytes() == payload
     with client(lambda _: pytest.fail('built job recollected')) as http:
         assert a.collect_batch(setup, job_id='sharded', client=http, clock=lambda: NOW)['state'] == 'validated'
+
+
+def test_asymmetric_allowances_two_page_rent(setup):
+    path = setup.data_root / 'operator-policy.json'
+    policy = json.loads(path.read_text())
+    policy['services']['molit-apartment-rent']['max_requests'] = 6
+    path.write_text(json.dumps(policy))
+    calls = []
+    item = b'<item><dealYear>2026</dealYear><dealMonth>11</dealMonth><dealDay>1</dealDay></item>'
+    def respond(request):
+        calls.append(request)
+        if 'Rent' not in request.url.path:
+            return httpx.Response(200, content=ZERO)
+        page = int(request.url.params['pageNo'])
+        payload = ZERO.replace(b'<items/>', b'<items>' + item * (1000 if page == 1 else 1) + b'</items>')
+        payload = payload.replace(b'<totalCount>0</totalCount>', b'<totalCount>1001</totalCount>')
+        payload = payload.replace(b'<pageNo>1</pageNo>', f'<pageNo>{page}</pageNo>'.encode())
+        return httpx.Response(200, content=payload)
+    with client(respond) as http:
+        result = a.collect_batch(setup, job_id='asymmetric', client=http, clock=lambda: NOW)
+    assert result['state'] == 'validated', result
+    assert len(calls) == 6
+    with StateStore(setup.state_db) as store:
+        assert store.reserved_requests('molit-apartment-sale', '2026-11-12') == 6
+        assert store.reserved_requests('molit-apartment-rent', '2026-11-12') == 12
+    assert Budget(sale_requests=9, rent_requests=12, sale_requests_per_pair=3,
+                  rent_requests_per_pair=6).pair_capacity == 2
+
+
+@pytest.mark.parametrize('mocked', [False, True])
+def test_dangling_job_manifest_refused(setup, monkeypatch, mocked):
+    path = setup.manifests_dir / 'dangling.json'
+    if mocked:
+        original = Path.lstat
+        def lstat(self, *args, **kwargs):
+            if self == path:
+                return original(setup.active_manifest)
+            return original(self, *args, **kwargs)
+        monkeypatch.setattr(Path, 'lstat', lstat)
+    else:
+        try:
+            path.symlink_to(setup.workspace / 'missing-target')
+        except OSError:
+            pytest.skip('symlink creation unavailable')
+    with client(lambda _: pytest.fail('collection before collision check')) as http:
+        with pytest.raises(a.p.PipelineError, match='job_id_collision'):
+            a.collect_batch(setup, job_id='dangling', client=http, clock=lambda: NOW)
+
+
+def test_reparse_ancestor_lstat_guard(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from kapa_runtime.storage.parquet import _safe_path
+    original = Path.lstat
+    def lstat(self, *args, **kwargs):
+        if self == tmp_path:
+            return SimpleNamespace(st_mode=0, st_file_attributes=0x400)
+        return original(self, *args, **kwargs)
+    monkeypatch.setattr(Path, 'lstat', lstat)
+    with pytest.raises(ValueError, match='reparse'):
+        _safe_path(tmp_path / 'missing' / 'file')
+
+
+def test_reused_parent_shard_with_undeclared_observations(setup):
+    from kapa_runtime.releases.manifest_v2 import resolve_snapshot
+    parent = json.loads(setup.active_manifest.read_text())
+    import copy
+    origin_digest = manifest_digest(parent)
+    parts = copy.deepcopy(parent['selected_partitions'])
+    current = copy.deepcopy(parts)
+    for part in parts:
+        part['origin_digest'] = origin_digest
+    for part in current:
+        part['producer_release_id'] = 'B'
+        part['lawd_code'] = '11140'
+        for file in part['files']:
+            original = setup.snapshots_dir / 'A' / file['path']
+            file['path'] = file['path'].replace('lawd_code=11110', 'lawd_code=11140')
+            target = setup.snapshots_dir / 'B' / file['path']
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(original.read_bytes())
+    for part in parts:
+        for file in part['files']:
+            target = setup.snapshots_dir / 'B' / file['path']
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((setup.snapshots_dir / 'A' / file['path']).read_bytes())
+    block = dict(schema_version='kapa-runtime-coverage/1', selected_partitions=parts,
+                 coverage=coverage_for_partitions(parts, []),
+                 license='SPDX-License-Identifier: GPL-3.0-only')
+    payload = json.dumps(block).encode()
+    sha = hashlib.sha256(payload).hexdigest()
+    name = f'manifests/coverage/{sha}.json'
+    target = setup.snapshots_dir / 'B' / name
+    target.parent.mkdir(parents=True)
+    target.write_bytes(payload)
+    parent.update(release_id='B', batch_scope={'declared_pairs': [dict(lawd_code='11140', deal_ymd='202510')]},
+                  selected_partitions=current, coverage=coverage_for_partitions(current, [
+                      {k: part[k] for k in ('lawd_code', 'deal_ymd', 'service_id')} for part in current]),
+                  coverage_shards=[dict(path=name, sha256=sha, entries=6)])
+    dump_manifest(parent, setup.active_manifest)
+    dump_manifest(parent, setup.manifests_dir / 'B.json')
+    with StateStore(setup.state_db) as store:
+        store._connection.execute('INSERT INTO releases VALUES (?,?,?,?)',
+            ('B', 'active', json.dumps([{'state': 'published', 'evidence': {'commit_reread': True,
+             'published_manifest_sha256': manifest_digest(parent)}}]), NOW.isoformat()))
+    with client() as http:
+        result = a.collect_batch(setup, job_id='reuse-undeclared', client=http, clock=lambda: NOW)
+    assert result['state'] == 'validated', result
+    manifest = json.loads((setup.manifests_dir / 'reuse-undeclared.json').read_text())
+    resolved = resolve_snapshot(manifest, lambda name: (setup.snapshots_dir / 'reuse-undeclared' / name).read_bytes())
+    assert len(resolved['selected_partitions']) == 8
+    assert parent['coverage_shards'][0] in manifest['coverage_shards']
+
+
+def test_ownership_invariant_runs_before_collection(setup, monkeypatch):
+    from kapa_runtime.releases import snapshot
+    def reject(*args):
+        raise ValueError('Pair must belong to a unique block')
+    monkeypatch.setattr(snapshot, 'check_pair_ownership', reject)
+    with client(lambda _: pytest.fail('network before ownership preflight')) as http:
+        with pytest.raises(ValueError, match='unique block'):
+            a.collect_batch(setup, job_id='ownership-preflight', client=http, clock=lambda: NOW)
+    with StateStore(setup.state_db) as store:
+        assert all(store.reserved_requests(s, '2026-11-12') == 0 for s in a.SERVICES)
