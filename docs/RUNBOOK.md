@@ -29,6 +29,16 @@ market을 공개하려면 위 visibility만 `public`으로 명시한다. 문자�
 
 `examples/operator-policy.example.json`을 data_root의 `operator-policy.json`으로 복사한다. 실제 서비스 승인·잔여 호출 예산을 확인하여 서비스별 `max_requests`를 설정한다(3~150, 재시도를 포함해 페이지당 3회 예약, 최대 페이지 수는 floor(max_requests/3)). 일일 한도는 data.go.kr API별 10,000회, VWorld 40,000회라는 사용자 보고(`user-reported-2026-11-10`)이며 제공기관 검증은 아니다. VWorld 수집은 미구현이다. P0 호출은 Asia/Seoul 달력일·서비스별로 전체 max_requests를 SQLite에 보수적으로 예약하고 초과하면 거부한다. 각 실제 페이지·재시도 요청 직전 날짜를 다시 확인하고 자정을 넘으면 새 날짜에도 전체 run 예산을 보수적으로 예약한다. 새 날짜 잔액 부족 시 요청 전에 중단한다. 실패·미사용분도 환급하지 않으며 다른 프로그램이 소비한 한도는 별도 확인한다. `quota=null`을 확인 완료로 간주하지 않는다. 외부 저장·재배포 이용조건을 검토한 뒤에만 `terms_reviewed=true`로 바꾸고 `terms_basis`에 이용조건, 출처 URL, reviewed_at을 기록한다. 이는 법적 검증을 의미하지 않으며 manifest의 legal_verified는 항상 false다. 테스트 성공 후 `fixture_evidence.github_revision`에 해당 깨끗한 전체 HEAD SHA, `passed=true`를 기록한다. 근거가 없으면 build는 중단된다.
 
+## 수집 계획(3a)
+
+`planning.plan_day()`는 I/O·DB 없는 계획 함수이며 수집/예약/CLI 실행 기능은 아니다. 입력은 LAWD 목록, Asia/Seoul 오늘 날짜(aware datetime도 허용), 완전 sale+rent 관측 pair → observed_at 날짜 매핑이다. 정상 zero도 완전 관측이다. 서비스 범위의 교집합만 계획한다. sale 200601 / rent 201101은 잠정 기본값이며 실제 제공 범위 검증 전 확정하지 않는다.
+
+서비스별 9,000 requests, pair당 서비스별 150 requests(페이지당 3회), 공동 이론 상한 60 pairs와 batch cap 60을 함께 적용한다. refresh 20%(12 pairs), audit 5%(3 pairs)를 먼저 예약하고 잔여를 backfill에 쓴다(기본 75%, 미사용 share·정수 잔여 이관). 작은 batch cap은 share를 각각 제한하며 refresh가 먼저 사용한다. `refresh_sla_shortfall`은 due backlog 중 refresh share로 처리하지 못한 수다. 이미 쓴/예약한 예산은 호출자가 서비스별 입력에서 차감해야 한다. 이 함수 자체는 원자적 quota 예약·자정 전환·byte cap을 보장하지 않는다.
+
+순서는 refresh → audit → backfill이다. 현재월은 매일, 직전 1~3개월은 관측 후 7일, 직전 4~12개월은 관측일의 다음 달 같은 날(월말 clamp)에 due다. due는 오늘 기준 window에서 재평가한다. 지역 시작점은 Seoul 날짜 ordinal modulo 지역 수로 매일 순환하며 refresh 안에서는 최신 월부터다. audit은 12개월보다 오래된 관측 pair의 최신월·코드 정렬 목록을 같은 날짜 ordinal로 순환하며 오늘 관측한 pair는 제외한다. backfill은 서울 전체 공통 기간을 먼저 채운 뒤 전국 나머지로 넘어가며 각 단계는 최신월·코드 오름차순이다. 각 pair는 한 번만 반환한다. coverage가 모두 있더라도 stale refresh와 audit은 생길 수 있다.
+
+오프라인 기준표는 `registry/lawd_codes.json`, 출처·hash·count는 `lawd_codes.provenance.json`이다. code.go.kr의 active 10자리 법정동 코드 앞 5자리를 고유화하고 시도 집계 `xx000`은 제외한다. 그 외 시 집계와 세종 36110은 유지한다. 별도 RTMS 사용 검증 없는 추가 제외는 하지 않는다. 폐지·분할 코드의 과거 처리와 RTMS별 지역 의미 검증은 미해결이다. 원본 ZIP/TSV를 로컬에 확보한 뒤 `uv run --locked python -I -B tools/build_lawd_codes.py <raw-file> --output-dir <directory>`로 재생성한다. 다운로드된 raw는 커밋하지 않는다. 재생성은 네트워크를 사용하지 않는다.
+
 ## 실행
 
 저장소 루트에서 실행한다. 모든 명령은 JSON 한 개만 stdout에 출력하며 API 원문·키·상세 예외는 출력하지 않는다.

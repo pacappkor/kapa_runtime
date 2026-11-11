@@ -1,0 +1,14 @@
+{
+  "license": "SPDX-License-Identifier: GPL-3.0-only",
+  "source_name": "행정안전부 행정표준코드관리시스템 법정동코드 전체자료",
+  "source_url": "https://www.code.go.kr/etc/codeFullDown.do?codeseId=%EB%B2%95%EC%A0%95%EB%8F%99%EC%BD%94%EB%93%9C",
+  "download_date": "2026-11-12",
+  "raw_sha256": "44a3fe4cacf88ce98e35fb883807d2725b589f427ff4d73ee40b914d1286bacd",
+  "raw_bytes": 413481,
+  "archive_member": "법정동코드 전체자료.txt",
+  "payload_sha256": "962fd4cdfb6ccf2887b745eb97db55f71112b9f9a32c1f8fbd7692fb069b1df0",
+  "payload_bytes": 2472433,
+  "generation_rule": "Unique first five digits of active (존재) ten-digit legal district codes; exclude sido aggregates ending 000. Retain all other active prefixes, including city aggregates and Sejong 36110; no unverified RTMS-specific exclusions. Use the active prefix+00000 row name (otherwise shortest active name, lexical tie break). Historical abolished/split-code handling is unresolved.",
+  "historical_codes": "unresolved",
+  "count": 269
+}
