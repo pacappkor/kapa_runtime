@@ -175,8 +175,13 @@ def _verify_complete(root, meta, *, data_schema_version="kapa-runtime-data/2"):
                              transaction_type=service.rsplit("-", 1)[1], data_schema_version=data_schema_version)
         actual = [r for f in completed["files"] for r in read_partition(root / f["path"], schema_version=data_schema_version)]
         _require(len(expected) == len(actual) == completed["rows"], "normalization_count_mismatch")
-        _require(sorted(expected, key=lambda r: r.record_version_id) ==
-                 sorted(actual, key=lambda r: r.record_version_id), "normalization_replay_mismatch")
+        # Identical provider rows share a version ID but retain distinct page/item
+        # references. Parquet's tie-break order need not match source order (e.g.
+        # item 10 sorts before item 2). Pair by durable provenance as well, while
+        # still comparing every field and retaining duplicate multiplicity.
+        replay_key = lambda r: (r.record_version_id, r.source_payload_ref)
+        _require(sorted(expected, key=replay_key) ==
+                 sorted(actual, key=replay_key), "normalization_replay_mismatch")
     return files
 
 

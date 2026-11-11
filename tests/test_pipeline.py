@@ -85,6 +85,57 @@ def test_happy_path(settings):
     assert p.query(settings, filters={})["total"] == 2
 
 
+@pytest.mark.parametrize("duplicate_service", p.SERVICES)
+def test_collect_replays_duplicate_records_in_same_release(settings, monkeypatch, duplicate_service):
+    """Identical provider rows retain distinct page/item provenance, even at item 10."""
+    from datetime import datetime
+
+    def response(request):
+        service = p.SERVICES[1] if "Rent" in request.url.path else p.SERVICES[0]
+        count = 12 if service == duplicate_service else 1
+        money = ("<deposit>25,000</deposit><monthlyRent>30</monthlyRent>"
+                 if service.endswith("rent") else "<dealAmount>85,000</dealAmount>")
+        item = ("<item><dealYear>2025</dealYear><dealMonth>10</dealMonth>"
+                "<dealDay>7</dealDay><umdNm>가상동</umdNm><jibun>123</jibun>"
+                "<aptNm>가상아파트</aptNm><excluUseAr>84.9500</excluUseAr>"
+                "<floor>8</floor><buildYear>2010</buildYear>" + money + "</item>")
+        payload = ("<response><header><resultCode>000</resultCode></header><body>"
+                   f"<items>{item * count}</items><totalCount>{count}</totalCount>"
+                   "<pageNo>1</pageNo><numOfRows>1000</numOfRows></body></response>")
+        return httpx.Response(200, content=payload.encode("utf-8"))
+
+    with httpx.Client(transport=httpx.MockTransport(response)) as client:
+        for service, state in zip(p.SERVICES, ("collecting", "normalized")):
+            assert p.collect(settings, service=service, lawd_code="11110", deal_ymd="202510",
+                             release_id="duplicates", client=client)["state"] == state
+    root = settings.staging_dir / "duplicates"
+    meta = json.loads((root / "collection.json").read_text(encoding="utf-8"))
+    assert len(p._verify_complete(root, meta)) == 2
+    completed = meta["completed"][duplicate_service]
+    rows = [row for f in completed["files"] for row in p.read_partition(root / f["path"])]
+    assert len(rows) == 12
+    assert len({row.record_version_id for row in rows}) == 1
+    assert len({row.source_payload_ref for row in rows}) == 12
+    # The writer's lexical tie break puts item 10 before item 2, unlike raw order.
+    assert rows[1].source_payload_ref.endswith("&item=10")
+    fetched_at = datetime.fromisoformat(completed["fetched_at"])
+    assert all(row.first_seen_at == row.last_seen_at == fetched_at for row in rows)
+
+    # Reordering is harmless; replacing one duplicate's provenance is not.
+    from dataclasses import replace
+    read_partition = p.read_partition
+
+    def damaged_partition(path, **kwargs):
+        records = read_partition(path, **kwargs)
+        if records and records[0].transaction_type == duplicate_service.rsplit("-", 1)[1]:
+            records[0] = replace(records[0], source_payload_ref=records[1].source_payload_ref)
+        return records
+
+    monkeypatch.setattr(p, "read_partition", damaged_partition)
+    with pytest.raises(p.PipelineError, match="normalization_replay_mismatch"):
+        p._verify_complete(root, meta)
+
+
 def test_auth_failure(settings):
     with http("auth-error.xml") as client:
         result = p.collect(settings, service=p.SERVICES[0], lawd_code="11110", deal_ymd="202510", release_id="bad", client=client)
