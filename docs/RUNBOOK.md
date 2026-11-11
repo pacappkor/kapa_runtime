@@ -414,6 +414,15 @@ producer 원본 manifest 및 publication ledger가 필요하다. v1 ACTIVE에는
 미사용 예약은 환급하지 않는다. 서비스별 9,000/day 및 더 작은 operator/provider 한도를
 준수한다. HTTP 429는 이 경로에서 자동 재시도하지 않는다. v1 adapter 기본 동작은 유지한다.
 
+`collect-batch` 종료 코드는 다음과 같다. `0`은 `validated`(로컬 build 완료), `empty`(수집 대상 없음),
+또는 명시적 `--dry-run`의 `planned`만 의미한다. `3`은 `paused`이며 자동화는 같은 job-id로
+재개를 예약해야 한다. `1`은 `blocked`/오류 및 그 밖의 미완료·알 수 없는 상태이고,
+`2`는 설정 오류 또는 CLI 인자 오류다. 성공 코드는 게시나 ACTIVE 전환을 의미하지 않는다.
+각 서비스의 `max_requests`는 생략할 수 없는 정수(3~150, 3의 배수)이며 기본값으로 대체하지 않는다.
+실수집 전에 `terms_basis`가 공백 제거 후 비어 있지 않은 문자열인지 검증한다.
+job-id는 ledger 기록·경로 사용 전에 설정된 모든 secret으로 검사하며 일치하면
+값을 노출하지 않고 `identifier_scan_failed`로 거부한다.
+
 재개는 반드시 같은 job-id를 사용한다. page 중단은 새 attempt/run/observation으로 page 1부터
 시작하며 성공한 sibling은 page hash·schema·행수·정규화 replay·secret scan 후 재사용한다.
 partial을 합치지 않는다. `paused`는 quota/provider 중단이며 다음 날 같은 job을 재개한다.

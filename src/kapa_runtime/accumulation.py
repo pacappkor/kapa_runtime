@@ -99,7 +99,7 @@ def _coverage(resolved, store):
 def _plan(settings, store, resolved, policy, clock):
     codes, reference = lawd_reference(settings.exclude_parent_city_aggregates)
     day = _day(clock)
-    budgets = [policy.get("services", {}).get(s, {}).get("max_requests", 150) for s in SERVICES]
+    budgets = [policy.get("services", {}).get(s, {}).get("max_requests") for s in SERVICES]
     p._require(all(type(v) is int and 3 <= v <= 150 and v % 3 == 0 for v in budgets), "invalid_pair_budget")
     limits = []
     registry = ServiceRegistry.load()
@@ -197,6 +197,8 @@ def _verify_result(settings, evidence, code, month, secrets):
 
 def _save_result(settings, store, result, job, code, month, attempt, secrets):
     obs = result.observation
+    p._check_identifiers(secrets, obs.observation_id, obs.run_id, obs.service_id,
+                         job, code, month, attempt)
     p._id(obs.observation_id)
     p._require(obs.service_id in SERVICES and obs.request["LAWD_CD"] == code
                and obs.request["DEAL_YMD"] == month and obs.parser_version == adapter.PARSER_VERSION,
@@ -260,11 +262,31 @@ def _save_result(settings, store, result, job, code, month, attempt, secrets):
     return evidence
 
 
+def _terms(policy):
+    """Apply the build path's reviewed, nonblank string evidence contract."""
+    terms = {s: policy.get("services", {}).get(s, {}) for s in SERVICES}
+    p._require(all(t.get("terms_reviewed") is True
+                   and isinstance(t.get("terms_basis"), str)
+                   and bool(t["terms_basis"].strip()) for t in terms.values()),
+               "build_evidence_required")
+    return terms
+
+
 def collect_batch(settings, *, job_id=None, dry_run=False, client=None,
                   clock=lambda: datetime.now(ZoneInfo("Asia/Seoul"))):
     if dry_run:
         return plan(settings, clock=clock)
-    job = p._id(job_id or "job-" + uuid4().hex)
+    policy = p._policy(settings)
+    p._require(policy.get("accumulation_smoke_verified") is True, "operator_smoke_required")
+    _terms(policy)
+    secrets = p._loaded_secrets(settings)
+    # Check before opening the ledger or deriving any path from operator input.
+    job = job_id if job_id is not None else "job-" + uuid4().hex
+    try:
+        p._check_identifiers(secrets, job)
+    except Exception:
+        raise p.PipelineError("identifier_scan_failed") from None
+    job = p._id(job)
     with StateStore(settings.state_db) as store:
         store.migrate_jobs()
         con = store._connection
@@ -272,8 +294,6 @@ def collect_batch(settings, *, job_id=None, dry_run=False, client=None,
         # silently retry authentication, schema or security failures.
         p._require(not con.execute("SELECT 1 FROM collection_jobs WHERE state='blocked'").fetchone(),
                    "operator_intervention_required")
-        policy = p._policy(settings)
-        p._require(policy.get("accumulation_smoke_verified") is True, "operator_smoke_required")
         parent, resolved, parent_root = _parent(settings, store)
         row = con.execute("SELECT state,data FROM collection_jobs WHERE job_id=?", (job,)).fetchone()
         daily, budget, reference = _plan(settings, store, resolved, policy, clock)
@@ -309,7 +329,6 @@ def collect_batch(settings, *, job_id=None, dry_run=False, client=None,
                 raise
         amount = data["requests_per_attempt"]
         try:
-            secrets = p._loaded_secrets(settings)
             registry = ServiceRegistry.load()
             limits = {}
             for service in SERVICES:
@@ -386,9 +405,8 @@ def _freeze(settings, store, job, data, parent, resolved, parent_root, secrets, 
     p._require(len(parts) <= 120 and total <= MAX_BATCH_BYTES, "batch_cap_exceeded")
     sha = p._git_revision(settings)
     siblings, warnings = p.workspace_guard.capture(settings)
-    terms = {s: policy.get("services", {}).get(s, {}) for s in SERVICES}
-    p._require(all(t.get("terms_reviewed") is True and t.get("terms_basis") for t in terms.values())
-               and policy.get("fixture_evidence", {}).get("passed") is True
+    terms = _terms(policy)
+    p._require(policy.get("fixture_evidence", {}).get("passed") is True
                and policy["fixture_evidence"].get("github_revision") == sha, "build_evidence_required")
     template = build_manifest(release_id=job, state="validated", files=[],
         created_at=str(data["plan"]["day"]) + "T00:00:00+09:00",

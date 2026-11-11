@@ -228,6 +228,64 @@ def test_smoke_gate_and_plan_no_credential(setup, monkeypatch):
     assert a.collect_batch(setup, dry_run=True, clock=lambda: NOW)['state'] == 'planned'
 
 
+@pytest.mark.parametrize('job', ['test-only-secret', 'prefix-test-only-secret'])
+def test_job_identifier_secret_refused_before_persistence(setup, job):
+    before = setup.state_db.read_bytes()
+    with client(lambda _: pytest.fail('network before identifier validation')) as http:
+        with pytest.raises(a.p.PipelineError) as error:
+            a.collect_batch(setup, job_id=job, client=http, clock=lambda: NOW)
+    assert str(error.value) == 'identifier_scan_failed'
+    assert setup.state_db.read_bytes() == before
+    assert not (setup.data_root / 'accumulation').exists()
+    assert not (setup.snapshots_dir / job).exists()
+    assert not (setup.manifests_dir / (job + '.json')).exists()
+
+
+@pytest.mark.parametrize('service', a.SERVICES)
+@pytest.mark.parametrize('budget', [None, True, '3', 3.0, 0, 2, 4, 151, 153])
+def test_invalid_or_missing_pair_budget(setup, service, budget):
+    path = setup.data_root / 'operator-policy.json'
+    policy = json.loads(path.read_text())
+    if budget is None:
+        policy['services'][service].pop('max_requests')
+    else:
+        policy['services'][service]['max_requests'] = budget
+    path.write_text(json.dumps(policy))
+    with client(lambda _: pytest.fail('network before budget validation')) as http:
+        with pytest.raises(a.p.PipelineError, match='invalid_pair_budget'):
+            a.collect_batch(setup, job_id='budget', client=http, clock=lambda: NOW)
+    with StateStore(setup.state_db) as store:
+        assert store._connection.execute('SELECT count(*) FROM collection_jobs').fetchone()[0] == 0
+        assert store._connection.execute('SELECT count(*) FROM runs').fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('service', a.SERVICES)
+@pytest.mark.parametrize('basis', [None, '', ' \t\n', True, 1, ['review'], {'review': True}])
+def test_invalid_terms_before_collection(setup, service, basis):
+    path = setup.data_root / 'operator-policy.json'
+    policy = json.loads(path.read_text())
+    policy['services'][service]['terms_basis'] = basis
+    path.write_text(json.dumps(policy))
+    before = setup.state_db.read_bytes()
+    with client(lambda _: pytest.fail('network before terms validation')) as http:
+        with pytest.raises(a.p.PipelineError, match='build_evidence_required'):
+            a.collect_batch(setup, job_id='terms', client=http, clock=lambda: NOW)
+    assert setup.state_db.read_bytes() == before
+
+
+@pytest.mark.parametrize('state,expected', [
+    ('validated', 0), ('empty', 0), ('paused', 3), ('blocked', 1),
+    ('running', 1), ('built', 1), ('planned', 1), ('partial', 1),
+    ('failed', 1), ('quarantined', 1), ('unknown', 1), (None, 1),
+])
+def test_collect_batch_cli_exit_states(setup, monkeypatch, capsys, state, expected):
+    from kapa_runtime import cli
+    monkeypatch.setattr(cli.RuntimeSettings, 'load', lambda path: setup)
+    monkeypatch.setattr(a, 'collect_batch', lambda *args, **kwargs: {'state': state})
+    assert cli.main(['collect-batch', '--job-id', 'job', '--config', 'unused.json']) == expected
+    assert json.loads(capsys.readouterr().out)['state'] == state
+
+
 def test_pair_cap():
     with pytest.raises(ValueError, match='60'):
         Budget(batch_cap=61)

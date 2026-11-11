@@ -97,7 +97,16 @@ def main(argv=None) -> int:
             else:
                 with redirect_stdout(sys.stderr):
                     output = getattr(pipeline, name.replace("-", "_"))(settings, **args)
-            code = 1 if output.get("state") in ("failed", "partial", "quarantined", "blocked") else 0
+            if name == "collect-batch":
+                state = output.get("state")
+                if state == "paused":
+                    code = 3
+                elif state in ("validated", "empty") or (args.get("dry_run") and state == "planned"):
+                    code = 0
+                else:
+                    code = 1
+            else:
+                code = 1 if output.get("state") in ("failed", "partial", "quarantined", "blocked") else 0
     except ConfigurationError:
         output, code = {"status": "error", "error_code": "configuration_error"}, 2
     except pipeline.PipelineError as exc:
