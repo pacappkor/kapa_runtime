@@ -4,6 +4,8 @@ Design baseline: [original v0.1](docs/design/README.md), `docs/design/01..08`, p
 
 ## Hard rules
 
+- Default review ownership is declared in `.github/CODEOWNERS`.
+
 - This GitHub repository contains **public code**. Operator data and credentials stay outside the repository under the local operator boundary. HF `pacappkor/kapa-market-data` is public; `pacappkor/kapa-market-data-staging` stays private for verification. HF configuration defaults remain **private**. Only the `market` role (reviewed public-data-derived normalized transactions) may be explicitly configured `visibility: "public"`; require recorded terms review for every released service. Knowledge, evals, property, matters, raw envelopes and logs remain private/local. Never auto-flip existing visibility or fall back to public; refuse any configured/actual mismatch.
 - Credential files (`data_gov_key.txt`, `hf_token.txt`, `rone_key.txt`, `vworld_key.txt`, `edu_gh_token.txt`, `law_oc.txt`) are read **only** by `kapa_runtime.credentials` at runtime. Agents and tests must never open them, print env secrets, or embed key values. Tests use fake keys like `TESTKEY-not-real`.
 - No real network in tests. Use `httpx.MockTransport` and fake `HfApi` doubles. Real API / HF smoke runs are done by the orchestrator only.
