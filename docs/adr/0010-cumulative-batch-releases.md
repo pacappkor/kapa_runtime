@@ -83,3 +83,57 @@ LAWD city aggregate exclusion은 기본 true의 config flag다. active city 이�
 4자리가 일치하는 하위 gu가 있으면 끝자리 0의 city aggregate를 제외한다. committed 원본과
 provenance는 그대로 보존하고 digest에 결속한다. MOLIT sigungu 의미에 대한 잠정 결정이며
 실제 제공 범위·중복 방지 효과는 operator smoke로 검증해야 한다.
+
+### 5 query/MCP implementation (issue #7)
+
+The ACTIVE reader now resolves v2 current inventory through the common resolver,
+using digest-bound flat shard bytes and no directory glob. Ledger publication
+binding and full-current-inventory pre/post verification remain mandatory. Archived
+observations outside current inventory are intentionally neither queried nor verified;
+this is not an archive integrity audit. Selected data is checked against validated
+partition metadata before pruning can be trusted. v1 behavior remains supported.
+
+Arrow Dataset scanners feed fresh bounded readers into bound-parameter DuckDB
+count/page queries. Projection/filter pushdown and region/service/month pruning
+avoid Python-wide row materialization. Batches are 4096 rows, readahead is bounded,
+and DuckDB working memory is capped at 256 MB with external access disabled.
+Global ordering includes all response fields as tie-breakers; exact duplicate rows
+retain multiplicity. Deep offset queries may fail at the engine memory limit.
+
+Portable unsigned cursors bind root manifest digest, canonical filters, ordering,
+and offset. Root provenance changes invalidate cursors even with identical data.
+The read-only `get_data_coverage` tool paginates exact K unions and returns set
+membership, zero/gaps, producer/observation provenance and explicit unknown
+staleness (no unapproved SLA). Full inventory verification costs remain intentional;
+reducing them requires a separate decision. Publication/bootstrap integration and
+real-data smoke remain subsequent orchestration responsibilities.
+
+#### Metadata resource bounds (PR #12 follow-up)
+
+The ACTIVE query reader budgets root plus all coverage-shard raw bytes at **256 MiB**
+by default, in addition to the existing **16 MiB per-file** limit. Trusted Python
+callers may set `metadata_budget` on `search_active`, `TransactionQuery`, or
+`SnapshotInventory`; it is not an untrusted MCP argument. ACTIVE uses the actual
+root bytes (including whitespace); dictionary-only callers use canonical root size.
+Shard reads are capped by the remaining budget before allocation. Budget failures
+fail closed as `SnapshotIntegrityError`, surfaced by MCP as `status: "error"`
+with the distinct `data.error_code: "active_snapshot_unverified"`, not
+`invalid_request` or partial results.
+This is a raw metadata budget, not a promise that process RSS stays below 256 MiB.
+
+Each shard is parsed once, its raw bytes released immediately, and inventory is
+built from the single decoded view. ACTIVE reuses that view for full pre/post file
+and shard hashing rather than resolving metadata repeatedly; no integrity checks
+are removed.
+
+The v2 writer/reader contract now bounds every string value and object key to
+**256 Unicode characters**, except file `path`, `unresolved_gaps` items and
+`terms_basis`, which allow **4096 characters**. Existing stricter formats remain:
+identifiers are still at most **128 characters**, hashes and dates retain their
+validation, and repository keys are at most 256. This includes extensible nested
+quality/provenance fields, root/partition parser versions, source runs, revisions,
+and previous-observation references. v1 is unchanged. Over-limit v2 input is
+rejected, never truncated. The local step-3b writer uses UUID run/observation IDs,
+short parser versions, ISO timestamps and digests; its `quality.terms_evidence`
+shape remains supported with the explicit 4096-character `terms_basis` allowance.
+Operators must shorten longer terms text or reference separately stored evidence.
