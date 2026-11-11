@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-only
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from importlib.resources import files
 import importlib.util
 import json
 from pathlib import Path
 import re
+import subprocess
+import sys
 
 import pytest
 
@@ -43,11 +45,10 @@ def test_order_rotation_and_determinism():
     lanes = [item.lane for item in result.items]
     assert lanes == sorted(lanes, key=["refresh", "audit", "backfill"].index)
     first = [item for item in result.items if item.deal_ymd == "202611" and item.lane == "refresh"]
-    ordered = sorted(codes)
-    offset = TODAY.toordinal() % len(codes)
-    assert [item.lawd_code for item in first] == ordered[offset:] + ordered[:offset]
+    assert [item.lawd_code for item in first] == sorted(codes)
+    # Without successful observations there is no cursor advancement.
     tomorrow = plan_day(codes, today=date(2026, 11, 13), coverage=coverage)
-    assert tomorrow.items[0].lawd_code != result.items[0].lawd_code
+    assert tomorrow.items == result.items
     backfill = [item.pair for item in result.items if item.lane == "backfill"]
     assert backfill == sorted(backfill, key=lambda p: (-int(p[1]), p[0]))
 
@@ -57,10 +58,67 @@ def test_audit_rotates_and_skips_todays_observations():
     first = plan_day(["11110"], today=TODAY, coverage=coverage)
     audits = [item.pair for item in first.items if item.lane == "audit"]
     assert len(audits) == 3
-    second = plan_day(["11110"], today=date(2026, 11, 13), coverage=coverage)
-    assert audits != [item.pair for item in second.items if item.lane == "audit"]
     coverage.update({pair: TODAY for pair in audits})
+    second = plan_day(["11110"], today=date(2026, 11, 13), coverage=coverage)
+    assert not set(audits) & {item.pair for item in second.items if item.lane == "audit"}
     assert not set(audits) & {i.pair for i in plan_day(["11110"], today=TODAY, coverage=coverage).items}
+
+
+@pytest.mark.parametrize("initial_observation", [None, date(2026, 10, 1)])
+def test_refresh_full_registry_rotation(initial_observation):
+    table = json.loads(files("kapa_runtime.registry").joinpath("lawd_codes.json").read_text(encoding="utf-8"))
+    codes = [row["code"] for row in table["codes"]]
+    assert len(codes) == 269
+    start = date(2026, 11, 1)
+    coverage = {} if initial_observation is None else {
+        (code, "202611"): initial_observation for code in codes}
+    seen = set()
+    for offset in range((len(codes) + 11) // 12):
+        day = start + timedelta(days=offset)
+        plan = plan_day(codes, today=day, coverage=coverage)
+        assert plan == plan_day(reversed(codes), today=day,
+                                coverage=dict(reversed(list(coverage.items()))))
+        refresh = {item.pair for item in plan.items if item.lane == "refresh"}
+        assert len(refresh) == 12
+        assert all(ym == "202611" for _, ym in refresh)
+        assert len(refresh - seen) == min(12, len(codes) - len(seen))
+        seen.update(refresh)
+        coverage.update({pair: day for pair in refresh})
+    assert seen == {(code, "202611") for code in codes}
+
+
+def test_audit_full_rotation_with_varying_budget():
+    codes = [f"{11001 + n:05d}" for n in range(269)]
+    coverage = {(code, "201101"): date(2020, 1, 1) for code in codes}
+    seen = set()
+    offset = 0
+    while len(seen) < len(codes):
+        day = TODAY + timedelta(days=offset)
+        budget = Budget(sale_requests=9000 if offset % 2 else 6000)
+        plan = plan_day(codes, today=day, coverage=coverage, budget=budget)
+        audits = {item.pair for item in plan.items if item.lane == "audit"}
+        assert len(audits - seen) == min(budget.lane_capacity(5), len(codes) - len(seen))
+        seen.update(audits)
+        coverage.update({pair: day for pair in audits})
+        offset += 1
+    assert seen == {(code, "201101") for code in codes}
+
+
+def test_refresh_missing_then_oldest_with_varying_budget():
+    codes = [f"{11001 + n:05d}" for n in range(30)]
+    coverage = {(code, "202611"): date(2026, 10, 1) for code in codes[:20]}
+    seen = set()
+    for offset, requests in enumerate([3000, 6000, 9000, 9000]):
+        day = date(2026, 11, 1) + timedelta(days=offset)
+        plan = plan_day(codes, today=day, coverage=coverage,
+                        budget=Budget(sale_requests=requests))
+        refresh = [item.pair for item in plan.items if item.lane == "refresh"]
+        if offset == 0:
+            assert refresh == [(code, "202611") for code in codes[20:24]]
+        assert len(set(refresh) - seen) == min(len(refresh), len(codes) - len(seen))
+        seen.update(refresh)
+        coverage.update({pair: day for pair in refresh})
+    assert len(seen) == len(codes)
 
 
 @pytest.mark.parametrize("ym,observed,today,expected", [
@@ -181,3 +239,26 @@ def test_generator_active_prefix_rule_and_determinism():
     assert (table, provenance) == module.generate(raw, "2026-11-12")
     with pytest.raises(ValueError):
         module.generate(b"wrong columns", "2026-11-12")
+    for invalid in ["20261112", "2026-1-12", "2026-02-30", "2026-W46-4", "2026-11-12T00:00:00"]:
+        with pytest.raises(ValueError):
+            module.generate(raw, invalid)
+
+
+def test_generator_cli_requires_valid_download_date(tmp_path):
+    script = Path(__file__).resolve().parents[1] / "tools" / "build_lawd_codes.py"
+    raw = tmp_path / "raw.tsv"
+    raw.write_text("법정동코드\t법정동명\t폐지여부\n1111000000\t서울특별시 종로구\t존재\n", encoding="utf-8")
+    output = tmp_path / "output"
+    command = [sys.executable, "-I", "-B", str(script), str(raw), "--output-dir", str(output)]
+    missing = subprocess.run(command, capture_output=True, text=True)
+    assert missing.returncode == 2 and "--download-date" in missing.stderr
+    for invalid in ["20261112", "2026-02-30"]:
+        result = subprocess.run(command + ["--download-date", invalid], capture_output=True, text=True)
+        assert result.returncode == 2
+    assert not output.exists()
+    valid = command + ["--download-date", "2026-11-12"]
+    subprocess.run(valid, check=True, capture_output=True)
+    first = {path.name: path.read_bytes() for path in output.iterdir()}
+    subprocess.run(valid, check=True, capture_output=True)
+    assert first == {path.name: path.read_bytes() for path in output.iterdir()}
+    assert json.loads(first["lawd_codes.provenance.json"])["download_date"] == "2026-11-12"

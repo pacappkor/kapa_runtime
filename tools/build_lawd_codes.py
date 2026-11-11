@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from datetime import date
 import hashlib
 import io
 import json
@@ -24,7 +25,15 @@ RULE = (
 )
 
 
+def validate_download_date(value: str) -> str:
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+        raise ValueError("download date must be YYYY-MM-DD")
+    date.fromisoformat(value)
+    return value
+
+
 def generate(raw: bytes, download_date: str) -> tuple[dict, dict]:
+    validate_download_date(download_date)
     payload = raw
     member = None
     if zipfile.is_zipfile(io.BytesIO(raw)):
@@ -79,7 +88,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("raw", type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--download-date", default="2026-11-12")
+    parser.add_argument("--download-date", required=True, type=validate_download_date)
     args = parser.parse_args()
     table, provenance = generate(args.raw.read_bytes(), args.download_date)
     args.output_dir.mkdir(parents=True, exist_ok=True)

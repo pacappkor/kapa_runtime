@@ -139,8 +139,11 @@ def plan_day(lawd_codes: Iterable[str | Mapping], *, today: date | datetime,
 
     Refresh and audit cannot consume each other's shares. Unused slots and integer
     rounding residue flow to backfill, which cannot exceed joint daily capacity.
-    Audit rotates through observed old pairs (not missing history), skipping pairs
-    already observed today. Replanning does not imply reservations or consumption;
+    Within each refresh month, missing then oldest observations go first, with
+    code ties. Audit picks oldest observed old pairs (not missing history), with
+    newest-month/code ties, skipping pairs already observed today. Callers feed
+    successful observations back as coverage to advance these pure input cursors.
+    Replanning does not imply reservations or consumption;
     callers must subtract already reserved requests from each service's budget.
     """
     day = _day(today)
@@ -173,13 +176,14 @@ def plan_day(lawd_codes: Iterable[str | Mapping], *, today: date | datetime,
     capacity = budget.pair_capacity
     if start > end:
         return DailyPlan(day, (), capacity, 0, share, 0, 0, None, None)
-    # Daily rotation is deliberately independent of coverage and Python hash seeds.
-    offset = day.toordinal() % len(ordered_codes) if ordered_codes else 0
-    rotated = ordered_codes[offset:] + ordered_codes[:offset]
+    # Observation dates form a deterministic cursor even with varying budgets.
+    # Missing observations precede all recorded dates (including date.min).
     refresh = []
     for month in range(end, max(start, current - 12) - 1, -1):
         ym = _ym(month)
-        for code in rotated:
+        oldest_codes = sorted(ordered_codes, key=lambda code: (
+            (code, ym) in observed, observed.get((code, ym), date.min), code))
+        for code in oldest_codes:
             due = refresh_due_on(ym, observed.get((code, ym)), day)
             if due is not None and due <= day:
                 refresh.append((code, ym))
@@ -187,10 +191,8 @@ def plan_day(lawd_codes: Iterable[str | Mapping], *, today: date | datetime,
     selected = {item.pair for item in items}
     audit = sorted((pair for pair, stamp in observed.items()
                     if pair[0] in codes and start <= _month(pair[1]) <= min(end, current - 13)
-                    and stamp < day), key=lambda pair: (-_month(pair[1]), pair[0]))
-    if audit:
-        offset = day.toordinal() % len(audit)
-        audit = audit[offset:] + audit[:offset]
+                    and stamp < day),
+                   key=lambda pair: (observed[pair], -_month(pair[1]), pair[0]))
     for pair in audit[:min(budget.lane_capacity(budget.audit_percent), capacity - len(items))]:
         items.append(PlannedPair(*pair, "audit"))
         selected.add(pair)

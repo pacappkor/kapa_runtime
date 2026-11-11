@@ -50,9 +50,9 @@ Canonical digest는 기존과 같은 UTF-8, 정렬 key, compact separators, non-
 
 ### 3a 계획 계층 (issue #5, 2026-11-12)
 
-`planning.py`는 관측 pair와 관측일을 입력받는 순수 계획 계층이다. 실행·DB·quota 예약·pipeline 통합은 후속 단계다. sale/rent 잠정 범위의 교집합에서만 계획하고, 서비스별 예산의 최솟값으로 상한을 잡는다. refresh 20%와 audit 5%를 우선 확보하며 미사용 share는 backfill로 이관한다. refresh backlog가 share를 넘으면 SLA shortfall을 명시한다. 현재월 daily 지역 순환, 직전 1~3개월 7일, 직전 4~12개월 calendar-month anniversary(월말 clamp), 더 오래된 관측 pair는 순환 audit이다. 서울 전 기간 backfill 뒤 전국 나머지, 각 단계 최신월·코드 오름차순을 유지한다. 상세 cadence와 입력 계약은 RUNBOOK의 수집 계획(3a)을 따른다.
+`planning.py`는 관측 pair와 관측일을 입력받는 순수 계획 계층이다. 실행·DB·quota 예약·pipeline 통합은 후속 단계다. sale/rent 잠정 범위의 교집합에서만 계획하고, 서비스별 예산의 최솟값으로 상한을 잡는다. refresh 20%와 audit 5%를 우선 확보하며 미사용 share는 backfill로 이관한다. refresh backlog가 share를 넘으면 SLA shortfall을 명시한다. 현재월 daily 지역 순환, 직전 1~3개월 7일, 직전 4~12개월 calendar-month anniversary(월말 clamp), 더 오래된 관측 pair는 순환 audit이다. refresh는 최신월 우선으로 월별 미관측·오래된 관측일·코드 순서, audit은 오래된 관측일 우선(동률은 최신월·코드)으로 선택한다. 성공한 관측일의 coverage 반영이 cursor를 전진시키며 예산 변화에도 공정성을 유지한다. 현재월 269지역을 기본 12 slots/day로 순환하는 데 ceil(269/12) = 23일이 필요하므로 daily cadence가 전국 daily SLA는 아니다. 서울 전 기간 backfill 뒤 전국 나머지, backfill 각 단계는 최신월·코드 오름차순을 유지한다. 상세 cadence와 입력 계약은 RUNBOOK의 수집 계획(3a)을 따른다.
 
-code.go.kr 전체자료의 active 10자리 코드에서 5자리 prefix를 생성하고 시도 집계 `xx000`은 제외한다. provenance에 다운로드 URL·날짜·원본 ZIP 및 내부 파일 SHA-256·생성 규칙·count를 결속한다. 결정적 로컬 generator를 제공하고 대형 원본은 커밋하지 않는다. 역사적 폐지·분할 코드 처리와 RTMS별 지역 의미 확인은 미해결이며 현재 표가 모든 과거 지역 coverage를 보장하지 않는다.
+code.go.kr 전체자료의 active 10자리 코드에서 5자리 prefix를 생성하고 시도 집계 `xx000`은 제외한다. provenance에 다운로드 URL·날짜·원본 ZIP 및 내부 파일 SHA-256·생성 규칙·count를 결속한다. 결정적 로컬 generator를 제공하고 대형 원본은 커밋하지 않는다. 재생성 시 `tools/build_lawd_codes.py <raw-file> --output-dir <directory> --download-date 2026-11-12`처럼 실제 다운로드 날짜를 필수 YYYY-MM-DD 인자로 명시한다(커밋된 원본의 날짜는 2026-11-12). 역사적 폐지·분할 코드 처리와 RTMS별 지역 의미 확인은 미해결이며 현재 표가 모든 과거 지역 coverage를 보장하지 않는다.
 
 ## 대안과 결과
 
