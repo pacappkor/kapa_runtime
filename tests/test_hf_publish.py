@@ -380,7 +380,7 @@ def test_public_terms_boundary(evidence):
     lambda s: s.encode().hex(), lambda s: base64.b64encode(s.encode()).decode()])
 def test_secret_upload_path_rejected(tmp_path, encode):
     from urllib.parse import quote
-    value = 'hf_AbCd0123456789'
+    value = 'hf_FAKE-NOT-A-REAL-TOKEN'
     class Secret:
         def reveal(self):
             return value
@@ -407,7 +407,7 @@ def test_url_encoded_secret_upload_path(tmp_path):
 
 @pytest.mark.parametrize('component', ['namespace', 'repo'])
 def test_repository_identifiers_scanned_at_construction(component):
-    value = 'hf_AbCd123456789'
+    value = 'hf_FAKE-NOT-A-REAL-TOKEN'
     class Secret:
         def reveal(self):
             return value

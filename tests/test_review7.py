@@ -153,7 +153,7 @@ def test_restore_only_restrictions(tmp_path):
 
 
 @pytest.mark.parametrize('name', ['api_key.txt', 'TOKEN.json', '.env', 'TESTKEY-not-real.json',
-    'fake%2Bcredential%3Dvalue.json', '66616b652b63726564656e7469616c3d76616c7565.json'])
+    'fake%2Bcredential%3Dvalue.json', 'fake+credential=value'.encode().hex() + '.json'])
 def test_replacement_path_scan(name):
     class ExtraSecret:
         def reveal(self):

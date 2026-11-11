@@ -11,8 +11,9 @@ from kapa_runtime.config import ConfigurationError, RuntimeSettings
 def test_relative_paths_and_derived(tmp_path):
     config = tmp_path / "runtime.json"
     config.write_text(json.dumps({"workspace": "work", "credential_files": {"rone": "fake.txt"},
-                                 "hf_namespace": "realsolution", "hf_repos": {"market": "kapa-market-data"}}))
+                                 "hf_namespace": "example-org", "hf_repos": {"market": "kapa-market-data"}}))
     settings = RuntimeSettings.load(config)
+    assert settings.hf_namespace == "example-org"
     assert settings.workspace == tmp_path / "work"
     assert settings.data_root == tmp_path / "work" / "_kapa_data"
     assert settings.credential_files == {"rone": tmp_path / "fake.txt"}
@@ -59,5 +60,7 @@ def test_design_shape(tmp_path):
     config = tmp_path / "design.json"
     config.write_text(json.dumps({"workspace_root": "..", "paths": {"data_root": "data"},
         "credentials": {"rone": {"fallback_file": "fake.txt"}},
-        "hugging_face": {"namespace": "realsolution", "repositories": {"market": "kapa-market-data"}}}))
-    assert RuntimeSettings.load(config).credential_files["rone"] == tmp_path / "fake.txt"
+        "hugging_face": {"namespace": "example-org", "repositories": {"market": "kapa-market-data"}}}))
+    settings = RuntimeSettings.load(config)
+    assert settings.hf_namespace == "example-org"
+    assert settings.credential_files["rone"] == tmp_path / "fake.txt"

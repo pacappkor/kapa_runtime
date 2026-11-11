@@ -10,6 +10,6 @@
     "rone": "../../rone_key.txt",
     "vworld": "../../vworld_key.txt"
   },
-  "hf_namespace": "realsolution",
+  "hf_namespace": "example-org",
   "hf_repos": {"market": "kapa-market-data"}
 }

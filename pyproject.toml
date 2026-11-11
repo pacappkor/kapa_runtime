@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "kapa-runtime"
 version = "0.1.0.dev0"
-description = "Private KAPA public-data collection, normalization, private release and workflow-state runtime"
+description = "KAPA public-data collection, normalization, controlled data release and local workflow-state runtime"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "GPL-3.0-only"

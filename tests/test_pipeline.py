@@ -346,7 +346,7 @@ def test_portable_pipeline_cursor(settings):
 @pytest.mark.parametrize('form', [lambda s: s, lambda s: s.encode().hex(),
                                  lambda s: base64.b64encode(s.encode()).decode().rstrip('=')])
 def test_all_credential_identifiers_rejected_before_writes(settings, form):
-    hf = 'hf_AbCd0123456789abcdefghijklm'
+    hf = 'hf_FAKE-NOT-A-REAL-TOKEN'
     settings.credential_files['hugging_face'].write_text(hf)
     release = 'release-' + form(hf)
     with pytest.raises((PublishError, p.PipelineError)):
@@ -366,7 +366,7 @@ def test_configured_invalid_other_credential_fails_closed(settings):
 
 def test_observation_identifier_checked_against_other_credentials(settings, monkeypatch):
     from dataclasses import replace
-    value = 'hf_AbCd0123456789abcdef'
+    value = 'hf_FAKE-NOT-A-REAL-TOKEN'
     settings.credential_files['hugging_face'].write_text(value)
     original = p.molit_rtms.collect
     def injected(*args, **kwargs):
@@ -452,7 +452,7 @@ def test_midnight_request_day_reservation(settings, new_day_full):
 
 def test_configured_repo_secret_rejected_before_state(settings):
     from dataclasses import replace
-    value = 'hf_AbCd0123456789abcdef'
+    value = 'hf_FAKE-NOT-A-REAL-TOKEN'
     settings.credential_files['hugging_face'].write_text(value)
     settings = replace(settings, hf_namespace=value)
     with http() as client, pytest.raises(PublishError, match='configured secret'):

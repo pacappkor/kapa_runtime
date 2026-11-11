@@ -1,6 +1,8 @@
 <!-- SPDX-License-Identifier: GPL-3.0-only -->
 원본 설계안 v0.1 (2026-11-10) 사본; 실제 구현과의 차이는 docs/adr 참조
 
+> 역사적 private-only 문구는 현재 코드 공개 정책이 아니다. 2026-11-11 정책은 공개 코드, 저장소 밖 로컬 운영 데이터, HF public market과 private staging을 구분한다. 현재 경계는 [ADR-0001](../adr/0001-repository-boundaries.md)·[ADR-0002](../adr/0002-hf-visibility.md) 및 [RUNBOOK](../RUNBOOK.md)을 따른다.
+
 # KAPA 공공데이터·Hugging Face 시스템 설계안
 
 작성일: 2026-11-10 (Asia/Seoul)  
