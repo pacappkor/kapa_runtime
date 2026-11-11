@@ -421,7 +421,18 @@ and month lists. Zero means observed with zero transactions, not missing data.
 `gaps_overlapping_query` is page-local for coverage pages; `complete` describes
 the whole filtered declared set. Unstructured manifest gaps remain separately
 reported and cannot safely be assigned to a particular partition.
-Per-partition producer, observation, origin digest and `fetched_at` are retained.
+For both query tools, `data` contains only `rows` and `total`; metadata appears
+only in the envelope (`coverage.query`, `partition_provenance`, `excluded`,
+`verification`, `limitations`, `warnings`, `next_cursor`). Consumers formerly
+reading these fields under `data` must use their envelope locations.
+Search coverage is a fixed-size pointer to `get_data_coverage`, not inline key sets.
+Search provenance includes only partitions contributing returned rows, capped at
+100 entries; `partition_provenance_summary` reports total contributors, limit and
+truncation. Use coverage pages for complete provenance. Coverage pages retain
+per-partition producer, observation, origin digest and `fetched_at`.
+A valid v2 coverage filter matching no declared or observed key returns `no_data`;
+a declared uncollected key still returns `ok`. Legacy coverage remains `ok` even
+though it has no exact-key row count.
 Staleness is explicitly unknown: no freshness SLA is inferred from collection cadence.
 Inspect timestamps before relying on old observations. Cancellation exclusions,
 snapshot digest, pinned dataset revisions, limitations and `legal_verified=false`
@@ -433,6 +444,9 @@ has a 256 MB working-memory limit and external access disabled. Deep OFFSET sort
 can fail within that bound rather than silently exhausting memory; narrow the query
 or restart with smaller scope. No process-wide constant-memory claim is made.
 
+Integrity failures at any point, including between initial verification and a
+shard/data read, return `error` with `active_snapshot_unverified`, never
+`invalid_query` or a normal empty result.
 Fail-closed errors require checking the local snapshot and publication evidence;
 never repair a manifest hash by hand or bypass the ledger. This read path does not
 make the separate cumulative publication/bootstrap rollout operational.

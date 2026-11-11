@@ -13,7 +13,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.dataset as ds
 
-from .snapshot_query import BATCH_SIZE, SnapshotInventory
+from .snapshot_query import BATCH_SIZE, PROVENANCE_LIMIT, SnapshotIntegrityError, SnapshotInventory
 
 from .parquet import SCHEMA, schema_for, _TIME_FIELDS, _row, _safe_path, read_partition
 
@@ -56,7 +56,10 @@ class TransactionQuery:
         self.root = self.root.resolve()
         self.root_manifest_digest = None
         self._snapshot_digest = None
-        self.inventory = SnapshotInventory(self.root, manifest) if manifest is not None else None
+        try:
+            self.inventory = SnapshotInventory(self.root, manifest) if manifest is not None else None
+        except Exception as exc:
+            raise SnapshotIntegrityError('snapshot_inventory_unverified') from exc
 
     def _load(self):
         _safe_path(self.root)
@@ -174,9 +177,24 @@ class TransactionQuery:
                         needed.add('building_name')
                     columns = {f.name: ds.field(f.name).cast(pa.timestamp('us'))
                                if f.name in _TIME_FIELDS else ds.field(f.name) for f in SCHEMA if not count_only or f.name in needed}
+                    if not count_only:
+                        # Arrow's fragment filename identifies the actual row owner,
+                        # even when observation IDs are reused across partitions.
+                        columns = [f.name for f in SCHEMA] + ['__filename']
                     reader = query_table.scanner(columns=columns, filter=expression,
                         batch_size=BATCH_SIZE, batch_readahead=1, fragment_readahead=1,
                         use_threads=False).to_reader()
+                    if not count_only:
+                        def batches(source):
+                            for batch in source:
+                                arrays = [batch.column(i).cast(pa.timestamp('us'))
+                                          if field.name in _TIME_FIELDS else batch.column(i)
+                                          for i, field in enumerate(batch.schema)]
+                                yield pa.RecordBatch.from_arrays(arrays, schema=page_schema)
+                        page_schema = pa.schema([
+                            pa.field(f.name, pa.timestamp('us') if f.name in _TIME_FIELDS else f.type)
+                            for f in SCHEMA] + [pa.field('_source_file', pa.string())])
+                        reader = pa.RecordBatchReader.from_batches(page_schema, batches(reader))
                     con.register("transactions", reader)
             register(count_only=True)
             excluded_count = con.execute(f"SELECT count(*) FROM transactions WHERE {where} AND {_CANCELLED}", parameters).fetchone()[0] if not include else 0
@@ -184,7 +202,8 @@ class TransactionQuery:
             selected = where if include else f"({where}) AND NOT {_CANCELLED}"
             total = con.execute(f"SELECT count(*) FROM transactions WHERE {selected}", parameters).fetchone()[0]
             register()
-            result = con.execute(f"SELECT {_SELECT} FROM transactions WHERE {selected} ORDER BY {_SORT} LIMIT ? OFFSET ?", [*parameters, limit, offset])
+            projection = _SELECT + (', _source_file' if self.inventory is not None else '')
+            result = con.execute(f"SELECT {projection} FROM transactions WHERE {selected} ORDER BY {_SORT} LIMIT ? OFFSET ?", [*parameters, limit, offset])
             names = [column[0] for column in result.description]
             rows = [dict(zip(names, values)) for values in result.fetchall()]
         for row in rows:
@@ -193,7 +212,13 @@ class TransactionQuery:
             row["extra"] = json.loads(row["extra"])
         if self.inventory is not None:
             self.inventory.verify(selected_files)
-            coverage = self.inventory.coverage(canonical)
+            coverage = {
+                'scope': 'digest-bound-exact-sets',
+                'details': 'Use get_data_coverage and follow next_cursor.',
+            }
+            page_files = {Path(r.pop('_source_file')) for r in rows}
+            contributors = [p for p in partitions
+                            if any(self.root / f['path'] in page_files for f in p['files'])]
         else:
             dates = table.column("contract_date").to_pylist()
             coverage = {
@@ -204,7 +229,9 @@ class TransactionQuery:
         details = {} if self.inventory is None else {
             'snapshot_id': self.inventory.manifest['release_id'],
             'snapshot_digest': snapshot,
-            'partition_provenance': self.inventory.provenance(partitions),
+            'partition_provenance': self.inventory.provenance(contributors[:PROVENANCE_LIMIT]),
+            'partition_provenance_summary': {'total': len(contributors), 'limit': PROVENANCE_LIMIT,
+                                             'truncated': len(contributors) > PROVENANCE_LIMIT},
             'limitations': ['Current observations only; archive is not queried.',
                             'Coverage completeness refers only to declared keys.',
                             'Freshness is unknown without an operator SLA.'],

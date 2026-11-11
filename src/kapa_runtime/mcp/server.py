@@ -19,6 +19,9 @@ from ..storage.active import ActiveSnapshotError, search_active, coverage_active
 
 def envelope(status, data=None, *, manifest=None, result=None):
     result = result or {}
+    if data is result:
+        # Query payload and envelope metadata have one canonical location each.
+        data = {name: result[name] for name in ('rows', 'total') if name in result}
     refs = manifest["hugging_face_revisions"] if manifest else []
     value = {
         "schema_version": "kapa-runtime-mcp/1", "request_id": str(uuid4()),
@@ -28,6 +31,7 @@ def envelope(status, data=None, *, manifest=None, result=None):
                        "hugging_face_revisions": refs},
         "snapshot_refs": refs,
         "partition_provenance": result.get("partition_provenance", []),
+        "partition_provenance_summary": result.get("partition_provenance_summary", {}),
         "excluded": result.get("excluded", {"count": 0, "reason": None}),
         "verification": result.get("verification", {}),
         "limitations": result.get("limitations", ["Coverage is not a legal verification."]),
@@ -105,7 +109,9 @@ def create_server(settings: RuntimeSettings) -> MCPServer:
         """
         try:
             manifest, result = coverage_active(settings, filters, limit=limit, cursor=cursor)
-            return envelope("ok", result, manifest=manifest, result=result)
+            status = ('no_data' if manifest['schema_version'] == 'kapa-runtime-release/2'
+                      and not result['total'] else 'ok')
+            return envelope(status, result, manifest=manifest, result=result)
         except ActiveSnapshotError as exc:
             code = str(exc)
             return envelope("no_active_release" if code == "no_active_release" else "error",

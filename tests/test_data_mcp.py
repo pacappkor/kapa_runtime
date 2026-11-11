@@ -106,7 +106,7 @@ def test_official_in_memory_protocol(active):
             assert first["status"] == "ok"
             assert first["data"]["rows"][0]["building_name"] == "한글 아파트"
             assert first["data"]["total"] == 2
-            assert first["data"]["excluded"]["count"] == 1
+            assert first["excluded"]["count"] == 1
             assert first["provenance"]["release_id"] == "synthetic"
             assert first["provenance"]["manifest_sha256"]
             assert first["snapshot_refs"][0]["commit_sha"] == "b" * 40
@@ -198,3 +198,121 @@ def test_fail_closed(active, tamper):
     asyncio.run(exercise())
     after = {p.relative_to(active.data_root): p.read_bytes() for p in active.data_root.rglob("*") if p.is_file()}
     assert before == after
+
+
+def test_v2_search_metadata_is_bounded(tmp_path):
+    from test_cumulative_query import active_fixture
+    settings, _ = active_fixture(tmp_path, pairs=[(str(10000 + i), '202510') for i in range(60)])
+
+    async def exercise():
+        async with Client(create_server(settings), mode="legacy") as client:
+            result = unpack(await client.call_tool('search_transactions', {'limit': 1}))
+            assert result['status'] == 'ok'
+            assert set(result['data']) == {'rows', 'total'}
+            assert result['data']['total'] == 120
+            assert len(result['partition_provenance']) == 1
+            assert result['partition_provenance'][0]['observation_id'] == result['data']['rows'][0]['observation_id']
+            assert result['partition_provenance_summary']['truncated'] is False
+            assert set(result['coverage']['query']) == {'scope', 'details'}
+            assert len(json.dumps(result, ensure_ascii=False).encode()) < 8000
+    asyncio.run(exercise())
+
+
+def test_v2_coverage_no_matching_key(tmp_path):
+    from test_cumulative_query import active_fixture
+    settings, _ = active_fixture(tmp_path)
+
+    async def exercise():
+        async with Client(create_server(settings), mode="legacy") as client:
+            result = unpack(await client.call_tool('get_data_coverage', {'filters': {'lawd_code': '99999'}}))
+            assert result['status'] == 'no_data'
+            assert result['data'] == {'rows': [], 'total': 0}
+            assert result['next_cursor'] is None
+            assert result['partition_provenance'] == []
+            # A declared but uncollected key is coverage, not no_data.
+            gap = unpack(await client.call_tool('get_data_coverage', {'filters': {'lawd_code': '41110'}}))
+            assert gap['status'] == 'ok'
+            assert gap['coverage']['query']['not_collected']
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('stage', ['initial', 'dataset', 'post_scan', 'constructor'])
+@pytest.mark.parametrize('tool', ['search_transactions', 'get_data_coverage'])
+def test_mid_query_integrity_is_not_invalid_query(tmp_path, monkeypatch, stage, tool):
+    from test_cumulative_query import active_fixture
+    from kapa_runtime.storage import active as module
+    from kapa_runtime.storage.snapshot_query import SnapshotInventory
+    settings, manifest = active_fixture(tmp_path)
+    victim = settings.snapshots_dir / 'A' / manifest['selected_partitions'][0]['files'][0]['path']
+    if stage in ('dataset', 'post_scan') and tool == 'get_data_coverage':
+        pytest.skip('coverage does not scan transaction datasets')
+    if stage == 'initial':
+        original = module.verify_local
+        def changed(*args, **kwargs):
+            original(*args, **kwargs)
+            victim.write_bytes(b'tampered')
+        monkeypatch.setattr(module, 'verify_local', changed)
+    elif stage == 'constructor':
+        original = module.TransactionQuery
+        def changed(*args, **kwargs):
+            victim.write_bytes(b'tampered')
+            raise ValueError('metadata changed before constructing reader')
+        monkeypatch.setattr(module, 'TransactionQuery', changed)
+    else:
+        original = SnapshotInventory.dataset
+        def changed(*args, **kwargs):
+            dataset = original(*args, **kwargs)
+            if stage == 'dataset':
+                victim.write_bytes(b'tampered')
+            else:
+                # Valid Parquet still reads, but bytes no longer match its digest.
+                table = pq.read_table(victim, partitioning=None)
+                pq.write_table(table, victim, compression='NONE')
+            return dataset
+        import pyarrow.parquet as pq
+        monkeypatch.setattr(SnapshotInventory, 'dataset', changed)
+
+    async def exercise():
+        async with Client(create_server(settings), mode="legacy") as client:
+            result = unpack(await client.call_tool(tool, {}))
+            assert result['status'] == 'error'
+            assert result['data'] == {'error_code': 'active_snapshot_unverified'}
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('tool', ['search_transactions', 'get_data_coverage'])
+def test_shard_changed_after_initial_verification(tmp_path, monkeypatch, tool):
+    from test_cumulative_query import active_fixture
+    from kapa_runtime.releases.manifest_v2 import coverage_for_partitions
+    from kapa_runtime.storage import active as module
+    settings, manifest = active_fixture(tmp_path)
+    shard = {'schema_version': 'kapa-runtime-coverage/1',
+             'license': 'SPDX-License-Identifier: GPL-3.0-only',
+             'selected_partitions': manifest['selected_partitions'], 'coverage': manifest['coverage']}
+    payload = json.dumps(shard).encode()
+    digest = hashlib.sha256(payload).hexdigest()
+    name = f'manifests/coverage/{digest}.json'
+    victim = settings.snapshots_dir / 'A' / name
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(payload)
+    count = len(shard['selected_partitions']) + sum(len(shard['coverage'][n])
+        for n in ('declared', 'observed', 'zero', 'not_collected'))
+    manifest.update(selected_partitions=[], coverage=coverage_for_partitions([], []),
+                    coverage_shards=[{'path': name, 'sha256': digest, 'entries': count}])
+    dump_manifest(manifest, settings.active_manifest)
+    with sqlite3.connect(settings.state_db) as con:
+        con.execute('UPDATE releases SET guard_evidence=?', (json.dumps([
+            {'state': 'published', 'evidence': {'commit_reread': True,
+             'published_manifest_sha256': manifest_digest(manifest)}}]),))
+    original = module.verify_local
+    def changed(*args, **kwargs):
+        original(*args, **kwargs)
+        victim.write_bytes(payload + b' ')
+    monkeypatch.setattr(module, 'verify_local', changed)
+
+    async def exercise():
+        async with Client(create_server(settings), mode='legacy') as client:
+            result = unpack(await client.call_tool(tool, {}))
+            assert result['status'] == 'error'
+            assert result['data'] == {'error_code': 'active_snapshot_unverified'}
+    asyncio.run(exercise())

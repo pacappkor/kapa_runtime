@@ -16,11 +16,12 @@ from test_manifest_v2 import root, partitions
 from test_parquet import record
 
 
-def fixture(root_dir, *, size=3):
+def fixture(root_dir, *, size=3, pairs=None):
     manifest = root()
     manifest['files'] = []
     parts = []
-    for region, month in [('11110', '202510'), ('26110', '202509')]:
+    pairs = pairs or [('11110', '202510'), ('26110', '202509')]
+    for region, month in pairs:
         for p in partitions(region=region, month=month):
             kind = p['service_id'].rsplit('-', 1)[1]
             rows = [] if kind == 'rent' else [_row(record('same', observation_id=p['observation_id'],
@@ -34,8 +35,8 @@ def fixture(root_dir, *, size=3):
             parts.append(p)
     parts.sort(key=key)
     manifest.update(selected_partitions=parts,
-        batch_scope={'declared_pairs': [{'lawd_code': '11110', 'deal_ymd': '202510'},
-                                         {'lawd_code': '26110', 'deal_ymd': '202509'}]})
+        batch_scope={'declared_pairs': [{'lawd_code': region, 'deal_ymd': month}
+                                        for region, month in pairs]})
     declared = [{k: p[k] for k in KEY} for p in parts]
     declared += [{k: p[k] for k in KEY} for p in partitions(region='41110', month='202508')]
     manifest['coverage'] = coverage_for_partitions(parts, sorted(declared, key=key))
@@ -49,10 +50,9 @@ def test_sums_duplicates_cancellations_and_exact_coverage(tmp_path):
     assert result['total'] == 4
     assert sum(r['price_krw'] for r in result['rows']) == 40
     assert result['excluded']['count'] == 2
-    assert len(result['coverage']['observed']) == 4
-    assert len(result['coverage']['zero']) == 2
-    assert len(result['coverage']['not_collected']) == 2
-    assert len(result['partition_provenance']) == 4
+    assert 'get_data_coverage' in result['coverage']['details']
+    assert len(result['partition_provenance']) == 2
+    assert all(p['status'] == 'success' for p in result['partition_provenance'])
     assert query.search({'include_cancelled': True})['total'] == 6
     assert query.search({'lawd_code': '26110', 'contract_date_to': '2025-09-30'})['total'] == 2
     assert query.search({'contract_date_from': '2025-10-01'})['total'] == 2
@@ -120,15 +120,13 @@ def test_partition_metadata_is_checked_before_pruning(tmp_path):
         SnapshotInventory(tmp_path, manifest).verify()
 
 
-def test_active_coverage_pagination_trust_and_offline(tmp_path, monkeypatch):
+def active_fixture(tmp_path, **kwargs):
     import sqlite3
-    import socket
     from kapa_runtime.config import RuntimeSettings
     from kapa_runtime.releases.manifest import dump_manifest, manifest_digest
-    from kapa_runtime.storage.active import coverage_active, search_active, ActiveSnapshotError
     settings = RuntimeSettings(tmp_path, tmp_path / 'data')
     directory = settings.snapshots_dir / 'A'
-    manifest = fixture(directory)
+    manifest = fixture(directory, **kwargs)
     (directory / 'README.md').write_bytes(b'fixture')
     manifest['files'] = [dict(path='README.md', sha256=hashlib.sha256(b'fixture').hexdigest(), rows=0)]
     manifest.update(state='published', quality={'passed': True, 'legal_verified': False},
@@ -144,6 +142,14 @@ def test_active_coverage_pagination_trust_and_offline(tmp_path, monkeypatch):
         con.execute('INSERT INTO releases VALUES (?, ?)', ('A', json.dumps([
             {'state': 'published', 'evidence': {'commit_reread': True,
               'published_manifest_sha256': manifest_digest(manifest)}}])))
+    return settings, manifest
+
+
+def test_active_coverage_pagination_trust_and_offline(tmp_path, monkeypatch):
+    import socket
+    from kapa_runtime.storage.active import coverage_active, search_active, ActiveSnapshotError
+    settings, manifest = active_fixture(tmp_path)
+    directory = settings.snapshots_dir / 'A'
     monkeypatch.setattr(socket, 'create_connection', lambda *a, **k: pytest.fail('network'))
     _, first = coverage_active(settings, limit=1)
     assert first['total'] == 6
@@ -161,3 +167,15 @@ def test_active_coverage_pagination_trust_and_offline(tmp_path, monkeypatch):
     victim.write_bytes(b'tampered')
     with pytest.raises(ActiveSnapshotError):
         search_active(settings, {'lawd_code': '11110'})
+
+
+def test_provenance_cap_and_empty_page(tmp_path, monkeypatch):
+    import kapa_runtime.storage.query as module
+    manifest = fixture(tmp_path)
+    monkeypatch.setattr(module, 'PROVENANCE_LIMIT', 1)
+    result = TransactionQuery(tmp_path, manifest=manifest).search({})
+    assert len(result['partition_provenance']) == 1
+    assert result['partition_provenance_summary'] == {'total': 2, 'limit': 1, 'truncated': True}
+    empty = TransactionQuery(tmp_path, manifest=manifest).search({'price_krw_min': 100})
+    assert empty['partition_provenance'] == []
+    assert empty['partition_provenance_summary']['total'] == 0

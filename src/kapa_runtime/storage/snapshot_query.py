@@ -16,6 +16,11 @@ from .metadata import read_metadata
 from .parquet import _safe_path, schema_for
 
 BATCH_SIZE = 4096
+PROVENANCE_LIMIT = 100
+
+
+class SnapshotIntegrityError(ValueError):
+    """Local snapshot bytes no longer satisfy their verified inventory."""
 
 
 def file_digest(path):
@@ -25,7 +30,14 @@ def file_digest(path):
 
 
 def verify_files(root, entries, version, partitions=()):
-    """Stream bytes and decoded batches; never collect a complete file in Python."""
+    """Stream bytes and decoded batches; classify every verification failure."""
+    try:
+        _verify_files(root, entries, version, partitions)
+    except Exception as exc:
+        raise SnapshotIntegrityError(str(exc)) from exc
+
+
+def _verify_files(root, entries, version, partitions):
     owners = {f['path']: p for p in partitions for f in p['files']}
     for entry in entries:
         path = Path(root) / relative_path(entry['path'])
