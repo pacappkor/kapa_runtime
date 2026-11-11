@@ -1,0 +1,85 @@
+{
+  "_license": "SPDX-License-Identifier: GPL-3.0-only",
+  "schema_version": "design-0.1",
+  "ready": false,
+  "workspace_root": "<workspace>",
+  "runtime_repository": "kapa_runtime",
+  "paths": {
+    "data_root": "<workspace>/_kapa_data",
+    "state_db": "<workspace>/_kapa_data/state/runtime.sqlite3",
+    "query_cache": "<workspace>/_kapa_data/cache",
+    "active_manifest": "<workspace>/_kapa_data/manifests/active.json"
+  },
+  "credentials": {
+    "data_go_kr": {
+      "environment_variable": "DATA_GO_KR_SERVICE_KEY",
+      "fallback_file": "<workspace>/data_gov_key.txt",
+      "file_read_allowed_only_by_credential_loader": true,
+      "key_format": "unverified",
+      "environment_present_but_invalid": "fail-without-file-fallback"
+    },
+    "hugging_face": {
+      "environment_variable": "HF_TOKEN",
+      "fallback_file": "<workspace>/hf_token.txt",
+      "file_read_allowed_only_by_credential_loader": true,
+      "token_scope_verified": false,
+      "environment_present_but_invalid": "fail-without-file-fallback"
+    },
+    "rone": {
+      "environment_variable": "RONE_API_KEY",
+      "fallback_file": "<workspace>/rone_key.txt",
+      "file_read_allowed_only_by_credential_loader": true,
+      "file_exists_verified": true,
+      "credential_tested": false,
+      "environment_present_but_invalid": "fail-without-file-fallback"
+    },
+    "vworld": {
+      "environment_variable": "VWORLD_API_KEY",
+      "fallback_file": "<workspace>/vworld_key.txt",
+      "file_read_allowed_only_by_credential_loader": true,
+      "file_exists_verified": true,
+      "credential_tested": false,
+      "environment_present_but_invalid": "fail-without-file-fallback"
+    }
+  },
+  "hugging_face": {
+    "namespace": null,
+    "repo_type": "dataset",
+    "required_visibility": "private",
+    "repositories": {
+      "market": null,
+      "property": null,
+      "knowledge_index": null,
+      "evals": null
+    },
+    "read_revision_policy": "full-commit-sha-from-manifest",
+    "upload_root_policy": "dedicated-staging-with-explicit-file-allowlist"
+  },
+  "api_policy": {
+    "arbitrary_urls_allowed": false,
+    "secret_logging_allowed": false,
+    "quotas": "service-registry",
+    "schedule_enabled": false,
+    "limits_require_implementation_configuration": true
+  },
+  "runtime_policy": {
+    "single_writer": true,
+    "customer_matters_upload_to_shared_hf": false,
+    "existing_kapa_mcp_handles_external_credentials": false,
+    "auto_activate_unvalidated_release": false
+  },
+  "unresolved": [
+    "HF namespace and exact repository identifiers",
+    "HF token identity and permissions",
+    "Public API per-service approval and limits",
+    "Public API key representation",
+    "Verified compatible GitHub revisions"
+  ],
+  "additional_api_request_policy": {
+    "handoff_document": "08_AGENT_HANDOFF.md",
+    "request_only_when_needed": true,
+    "check_existing_credentials_and_approvals_first": true,
+    "request_secret_values_in_chat": false,
+    "continue_independent_work": true
+  }
+}

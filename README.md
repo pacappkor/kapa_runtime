@@ -3,7 +3,9 @@
 
 KAPA 공공데이터 수집·정규화·비공개 데이터 릴리스·업무 상태 런타임(비공개).
 
-설계: 작업 루트의 `design/` 문서(01–08). 저장소는 private이며 HF 공개 정책은 RUNBOOK을 따른다.
+설계: [원본 설계안 v0.1](docs/design/README.md)(01–08)과 [실제 구현의 결정·차이(ADR)](docs/adr/README.md). 운영은 [RUNBOOK](docs/RUNBOOK.md)을 따른다.
+
+이 저장소와 HF 데이터셋은 기본 private이다. 사용자 정책에 따라 검토된 `market` 역할만 명시적 public 설정을 허용하며, 실제 가시성을 자동 변경하지 않는다. 나머지 역할은 private을 유지한다.
 
 ## 로컬 데이터 조회 MCP
 

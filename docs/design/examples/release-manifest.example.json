@@ -1,0 +1,40 @@
+{
+  "_license": "SPDX-License-Identifier: GPL-3.0-only",
+  "schema_version": "design-0.1",
+  "ready": false,
+  "release_id": null,
+  "state": "draft",
+  "created_at": null,
+  "source_runs": [],
+  "github_revisions": {
+    "pacappkor/kapa_edu_1": null,
+    "pacappkor/kapa_edu_2": null,
+    "pacappkor/kapa_skills": null,
+    "pacappkor/kapa_knowledge": null,
+    "pacappkor/kapa_mcp": null,
+    "pacappkor/kapa_runtime": null
+  },
+  "hugging_face_revisions": [],
+  "parser_version": null,
+  "data_schema_version": null,
+  "files": [],
+  "coverage": {
+    "services": [],
+    "lawd_codes": [],
+    "contract_months": [],
+    "complete": false
+  },
+  "quality": {
+    "report_ref": null,
+    "passed": false,
+    "legal_verified": false
+  },
+  "activation": {
+    "eligible": false,
+    "previous_release_id": null,
+    "activated_at": null
+  },
+  "unresolved_gaps": [
+    "This is an incomplete design example, not a collected dataset or deployable release."
+  ]
+}

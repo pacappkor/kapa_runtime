@@ -1,6 +1,6 @@
 # kapa_runtime — agent rules and module contracts
 
-Design source of truth: `../design/01..08` (workspace root, not in this repo). Read README, 03, 04, 05, 06 before coding.
+Design baseline: [original v0.1](docs/design/README.md), `docs/design/01..08`, preserved in this repo. Read README, 03, 04, 05, 06 before coding, then [implementation decisions and deviations](docs/adr/README.md) and [RUNBOOK](docs/RUNBOOK.md). The P0 module contracts below include historical interfaces; consult the ADRs and current code for later changes (including the internal HF writer and allowlisted extra fields).
 
 ## Hard rules
 
@@ -30,7 +30,7 @@ Shared types: `kapa_runtime.models` (Observation, TransactionRecord, Observation
 `registry/services.json` (packaged data) and `registry.py`: `ServiceRegistry.load()`, `get(service_id) -> ServiceSpec` (service_id, dataset_id, provider, priority, credential_alias, host, path, method, operation, required_params, page_size_max, approval_status, operation_verified, last_connection_check, quota, storage_and_redistribution_reviewed). Only the P0 services have host/path filled:
 - `molit-apartment-sale`: `apis.data.go.kr` `/1613000/RTMSDataSvcAptTrade/getRTMSDataSvcAptTrade`
 - `molit-apartment-rent`: `apis.data.go.kr` `/1613000/RTMSDataSvcAptRent/getRTMSDataSvcAptRent`
-Both: params `LAWD_CD` (5 digits), `DEAL_YMD` (YYYYMM), `pageNo`, `numOfRows`; `approval_status: "connection-verified-2026-11-10"`, `operation_verified: true` (orchestrator bounded probe 2026-11-10: resultCode 000, one page). Other services from `../design/examples/services.example.json` stay `approval-unverified` with null host/path.
+Both: params `LAWD_CD` (5 digits), `DEAL_YMD` (YYYYMM), `pageNo`, `numOfRows`; `approval_status: "connection-verified-2026-11-10"`, `operation_verified: true` (orchestrator bounded probe 2026-11-10: resultCode 000, one page). Other services from `docs/design/examples/services.example.json` stay `approval-unverified` with null host/path.
 
 ### adapters/molit_rtms.py (agent B)
 `collect(spec, secret, *, lawd_code, deal_ymd, client: httpx.Client, run_id, page_size=1000, max_pages=50, max_bytes=5_000_000) -> CollectionResult` where `CollectionResult` has `observation: Observation` and `pages: list[SanitizedPage]` (page_no, sha256, sanitized bytes, parsed items as list[dict[str, str|None]]). HTTPS only, host/path from spec, `follow_redirects=False`, timeouts, size cap, `defusedxml`. serviceKey passed as a param (decoded key encoded once by httpx). Check `resultCode` (`000` OK; anything else → classified error, no infinite retry), `totalCount`, page count, duplicate/missing pages, totalCount drift between pages. Retry only transient (timeouts, 429, 5xx) with bounded backoff+jitter honoring Retry-After; inject sleep for tests. Status per `ObservationStatus`; zero only from a valid envelope with `totalCount=0`. Nothing containing the key (URL, exception text, headers) is stored or raised — run `credentials.redact`.
@@ -44,7 +44,7 @@ Both: params `LAWD_CD` (5 digits), `DEAL_YMD` (YYYYMM), `pageNo`, `numOfRows`; `
 - `state.py`: SQLite (`state_db`) single-writer: tables `runs`, `observations`, `releases` (with `ReleaseState` transitions enforced by an allowed-transition map), `idempotency` (key = service+params+parser+scope). Exclusive lock file for writers; schema migrations versioned.
 
 ### releases/ (agent D)
-- `manifest.py`: build/validate release manifest per `../design/examples/release-manifest.example.json` (release_id, state, created_at, source_runs, github_revisions, hugging_face_revisions [{repo_id, commit_sha}], parser/data schema version, files [{path, sha256, rows}], coverage, quality, unresolved_gaps, legal_verified=false).
+- `manifest.py`: build/validate release manifest per `docs/design/examples/release-manifest.example.json` (release_id, state, created_at, source_runs, github_revisions, hugging_face_revisions [{repo_id, commit_sha}], parser/data schema version, files [{path, sha256, rows}], coverage, quality, unresolved_gaps, legal_verified=false).
 - `hf.py`: `HFPublisher(api, namespace, repo_name)` where `api` is an injected `HfApi`-like object. `ensure_private_repo()` creates `repo_type="dataset", private=True` if absent; if it exists and is not private → refuse (no auto-fix). `upload_candidate(staging_dir, allowlist: list[str]) -> commit_sha` uploads only allowlisted relative paths (reject traversal, symlinks, files outside staging, anything matching key/token patterns or containing configured secret values) in one `create_commit`; `verify(commit_sha, manifest)` re-downloads at that exact revision into a cache and compares sha256/rows.
 - `activate.py`: atomically replace `active_manifest` only after verification; keep previous for rollback; `rollback()` restores previous reference without deleting observations.
 
