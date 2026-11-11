@@ -1,9 +1,13 @@
 <!-- SPDX-License-Identifier: GPL-3.0-only -->
 # P0 운영 절차
 
+## GitHub 공개 전 설정 확인
+
+관리자는 GitHub private vulnerability reporting을 활성화하고 [SECURITY.md](../SECURITY.md)의 비공개 신고 경로를 확인한다. `.github/workflows/traffic.yml`은 조직 템플릿을 그대로 사용하며 기본 브랜치 `main`에 반영된 뒤 매일 실행된다. 조직 reusable workflow는 `main`을 별도 `traffic` 집계 브랜치에 동기화하고 방문·clone 집계를 기록한다. 관리자는 해당 저장소에 필요한 권한의 `TRAFFIC_TOKEN` Actions secret을 제공해야 한다. 토큰 값은 코드·문서·로그에 넣지 않는다. README 배지는 첫 집계 전에는 표시되지 않을 수 있다. 코드 변경만으로 이 GitHub 설정이나 실제 가시성이 바뀌지는 않는다.
+
 ## 사전 조건
 
-Python 3.12와 `uv sync --locked --extra test`가 필요하다. 실제 호출은 운영자만 수행한다. Git 작업 트리가 깨끗한 커밋에서 테스트한 뒤 build한다. 자격증명은 설정의 상대 경로 또는 환경변수로 제공하고 출력·커밋하지 않는다. **HF 기본값은 private이다. 사용자 정책(2026-11-10)에 따라 market 역할만 명시적 public 설정이 가능하다.** knowledge-index, evals, property, matters 및 GitHub 저장소는 private을 유지하고 raw·로그는 업로드하지 않는다. 실제 가시성과 설정이 다르면 어느 방향으로도 자동 변경하지 않고 거부한다.
+Python 3.12와 `uv sync --locked --extra test`가 필요하다. 실제 호출은 운영자만 수행한다. Git 작업 트리가 깨끗한 커밋에서 테스트한 뒤 build한다. 자격증명은 설정의 상대 경로 또는 환경변수로 제공하고 출력·커밋하지 않는다. **HF 기본값은 private이다. 사용자 정책(2026-11-10)에 따라 market 역할만 명시적 public 설정이 가능하다.** GitHub 코드는 공개 대상이며 운영 데이터·자격증명은 저장소 밖의 로컬 `data_root` 및 자격증명 경로에 둔다. HF `pacappkor/kapa-market-data`는 public, `pacappkor/kapa-market-data-staging`은 private 검증용이다(2026-11-11 정책). knowledge-index, evals, property, matters는 private을 유지하고 raw·로그는 업로드하지 않는다. 실제 가시성과 설정이 다르면 어느 방향으로도 자동 변경하지 않고 거부한다.
 
 설정 예시 (`../_kapa_data/runtime.config.json`, 경로는 이 파일 기준)
 
@@ -16,7 +20,7 @@ Python 3.12와 `uv sync --locked --extra test`가 필요하다. 실제 호출은
     "hugging_face_write": "../hf_write_token.txt",
     "hugging_face_read": "../hf_read_token.txt"
   },
-  "hf_namespace": "YOUR_PRIVATE_NAMESPACE",
+  "hf_namespace": "example-org",
   "hf_repos": {"market": {"name": "kapa-market", "visibility": "private"}}
 }
 ```

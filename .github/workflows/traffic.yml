@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copy to .github/workflows/traffic.yml on the caller's main (default) branch.
+name: Daily traffic
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  count:
+    uses: pacappkor/.github/.github/workflows/traffic-count.yml@main
+    secrets:
+      TRAFFIC_TOKEN: ${{ secrets.TRAFFIC_TOKEN }}

@@ -27,7 +27,7 @@ def test_empty_scan_set_refused(api):
 @pytest.mark.parametrize('location', ['content', 'path', 'namespace'])
 def test_injected_token_added_to_needles(tmp_path, location):
     api = FakeHfApi()
-    api.token = 'hf_InjectedOnly12345'
+    api.token = 'hf_FAKE-NOT-A-REAL-TOKEN'
     name = api.token + '.json' if location == 'path' else 'data.json'
     (tmp_path / name).write_text(api.token if location == 'content' else '{}')
     with pytest.raises(PublishError, match='configured secret'):

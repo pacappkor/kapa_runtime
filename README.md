@@ -1,11 +1,18 @@
 <!-- SPDX-License-Identifier: GPL-3.0-only -->
 # kapa_runtime
 
-KAPA 공공데이터 수집·정규화·비공개 데이터 릴리스·업무 상태 런타임(비공개).
+[![visitors](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/pacappkor/kapa_runtime/traffic/.traffic/badge-views.json)](https://github.com/pacappkor/kapa_runtime)
+[![clones](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/pacappkor/kapa_runtime/traffic/.traffic/badge-clones.json)](https://github.com/pacappkor/kapa_runtime)
+
+KAPA 공공데이터 수집·정규화·데이터 릴리스·업무 상태 런타임. 코드는 공개하며 운영 데이터와 자격증명은 저장소 밖에 둔다.
 
 설계: [원본 설계안 v0.1](docs/design/README.md)(01–08)과 [실제 구현의 결정·차이(ADR)](docs/adr/README.md). 운영은 [RUNBOOK](docs/RUNBOOK.md)을 따른다.
 
-이 저장소와 HF 데이터셋은 기본 private이다. 사용자 정책에 따라 검토된 `market` 역할만 명시적 public 설정을 허용하며, 실제 가시성을 자동 변경하지 않는다. 나머지 역할은 private을 유지한다.
+2026-11-11 공개 정책에 따라 이 저장소는 공개 코드 경계이며, 로컬 운영 데이터는 저장소 밖의 `data_root`에 둔다. HF `pacappkor/kapa-market-data`는 공개 market 데이터셋이고 `pacappkor/kapa-market-data-staging`은 비공개 검증용이다. HF 설정 기본값은 여전히 private이며, 검토된 `market` 역할만 명시적 public 설정과 서비스별 이용조건 검토를 허용한다. 실제 가시성과 설정이 다르면 자동 변경 없이 거부한다. knowledge-index, evals, property, matters는 private을 유지하며 raw·로그·자격증명은 공개하지 않는다.
+
+## 이용 시 주의 및 보안
+
+공개 코드와 데이터는 법적 정확성·완전성·최신성을 보장하지 않으며 법률 검증이나 공식 해석을 대신하지 않는다. 원자료 이용·재배포는 [공공데이터포털(data.go.kr)](https://www.data.go.kr/)의 해당 서비스 및 제공기관 이용조건을 따른다. 코드 라이선스가 원자료 이용조건을 대체하지 않는다. 취약점은 [SECURITY.md](SECURITY.md)의 비공개 신고 절차를 따른다.
 
 ## 로컬 데이터 조회 MCP
 
