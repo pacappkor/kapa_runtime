@@ -50,7 +50,7 @@ def main(argv=None) -> int:
         reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(prog="kapa-runtime")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("diagnose", "collect", "build", "publish", "activate", "rollback", "query", "attest-legacy", "plan", "collect-batch"):
+    for name in ("diagnose", "collect", "build", "publish", "activate", "rollback", "query", "attest-legacy", "plan", "collect-batch", "publish-batch"):
         command = commands.add_parser(name)
         command.add_argument("--config", type=Path)
         if name in ("build", "publish", "activate", "attest-legacy"):
@@ -60,9 +60,11 @@ def main(argv=None) -> int:
             command.add_argument("--lawd-code", required=True)
             command.add_argument("--deal-ymd", required=True)
             command.add_argument("--release-id", required=True)
-        if name == "collect-batch":
+        if name in ("collect-batch", "publish-batch"):
             command.add_argument("--job-id", required=True)
             command.add_argument("--dry-run", action="store_true")
+        if name in ("activate", "rollback"):
+            command.add_argument("--cumulative", action="store_true")
         if name == "publish":
             command.add_argument("--dry-run", action="store_true")
         if name == "query":
@@ -90,6 +92,10 @@ def main(argv=None) -> int:
             if name in ("plan", "collect-batch"):
                 from . import accumulation
                 output = getattr(accumulation, name.replace("-", "_"))(settings, **args)
+            elif name == "publish-batch":
+                from .releases.batch import publish_batch
+                with redirect_stdout(sys.stderr):
+                    output = publish_batch(settings, **args)
             elif name == "query":
                 controls = {k: args.pop(k) for k in ("release_id", "limit", "cursor")}
                 with redirect_stdout(sys.stderr):

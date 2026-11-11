@@ -501,3 +501,45 @@ shard/data read, return `error` with `active_snapshot_unverified`, never
 Fail-closed errors require checking the local snapshot and publication evidence;
 never repair a manifest hash by hand or bypass the ledger. This read path does not
 make the separate cumulative publication/bootstrap rollout operational.
+
+## 누적 batch 게시 (step 4)
+
+실제 HF 게시 전 operator smoke가 필수다. 이 구현의 fake-HF 검증은 실행 승인이나
+운영 smoke 완료 증거가 아니다. 기존 `accumulation_smoke_verified` 정책, public market
+명시 설정, reviewed terms, private staging, trusted ACTIVE parent가 필요하다.
+빌드 완료 job만 게시하며 job의 snapshot digest가 없는 이전 실험 job은 재빌드/검토한다.
+
+```sh
+uv run --locked kapa-runtime publish-batch --config runtime.json --job-id batch-id --dry-run
+uv run --locked kapa-runtime publish-batch --config runtime.json --job-id batch-id
+uv run --locked kapa-runtime activate --config runtime.json --release-id batch-id --cumulative
+# local ACTIVE rollback only; does not rewrite public history
+uv run --locked kapa-runtime rollback --config runtime.json --cumulative
+```
+
+Dry-run은 수집/commit/ACTIVE 변경 없이 기존 HF 대상의 전체 inventory를 읽고 검증한다.
+자격증명이 필요하며 staging/public 각각 `bytes`(변경 bytes), `ops`(Add+Delete),
+`files`(전체 결과 파일 수), 그리고 `pairs`를 보고한다. 대상이 없으면 먼저 운영자가
+설정/존재를 확인한다. 60 pairs / 512 MiB changed bytes / 500 operations 중 하나라도
+초과하면 자동 분할하지 않고 중지한다. 검증 전용 cache/SQLite 초기화는 로컬에 남을 수 있다.
+
+게시 순서는 private staging delta → pinned SHA 전체 검증 → public delta → pinned SHA
+전체 검증 → published ledger다. unchanged archive를 다시 Add하지 않지만 전체 bytes를
+계속 검증한다. README의 기본 데이터 목록은 current 선택만 포함한다. 원격 rogue path,
+명시되지 않은 삭제, tombstone 부활, parent/head/visibility 변경을 허용하지 않는다.
+
+종료 코드는 0=게시 성공/정상 dry-run, 1=검증·보안·복구·게시 실패,
+2=설정/CLI 입력 오류다. `collect-batch`의 quota pause 코드 3과 달리 게시 rate limit은
+1로 중지하며 `reason=hub_rate_limited`를 보고한다. commit 429는 최대 3회 시도,
+Retry-After 최대 60초를 그대로 기다린다. 더 긴 지시는 일찍 재시도하지 않고 중지한다.
+
+중단 시 같은 `--job-id`로 재실행한다. 원격 head가 journal의 전체 frozen inventory와
+일치하면 잃어버린 commit 응답을 해결하고 중복 commit하지 않는다. 불일치/손상은
+운영자 개입이 필요하며 새 job으로 우회하지 않는다. 검증 실패 후 public 복원은
+restore-only authority와 frozen spool bytes만 사용한다. 복원 실패의 journal을 삭제하거나
+head를 임의로 변경하지 않는다. spool은 state DB 옆 `publication-spool`에 있으며
+복구 완료 전 GC 금지; 현재 자동 GC 자체가 없다. credential/raw/log 파일은 게시하지 않는다.
+
+Operator smoke는 최소 A→B 게시/활성화→C 재관측/게시/활성화→B local rollback,
+각 commit operation 수, 전체 inventory 검증, private staging 실제 visibility 및
+기본 HF config의 archive 중복 배제를 확인한다. 공개 current rollback은 별도 절차다.

@@ -172,6 +172,9 @@ def validate_root(m):
               "hugging_face_revisions", "parser_version", "data_schema_version", "files", "coverage",
               "quality", "unresolved_gaps", "legal_verified", "release_kind", "parent_snapshot",
               "batch_scope", "selected_partitions", "coverage_shards"}
+    if 'staging_revision' in m:
+        require(m.get('state') in ('published', 'active'), 'Candidate staging revision forbidden')
+        fields.add('staging_revision')
     require(set(m) == fields, "Invalid v2 root fields (self hash/commit forbidden)")
     identifier(m["release_id"])
     require(m["release_kind"] in ("batch", "bootstrap"), "Invalid release kind")

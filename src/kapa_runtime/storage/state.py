@@ -252,6 +252,13 @@ class StateStore:
         parent = evidence.get("public_commit_sha")
         if not isinstance(parent, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", parent):
             raise ValueError("restoration journal expected head required")
+        if 'restore_inventory' in evidence:
+            from ..releases.spool import Spool, inventory_digest
+            entries = evidence['restore_inventory']
+            if inventory_digest(entries) != evidence['restore_digest']:
+                raise ValueError('restoration inventory digest mismatch')
+            spool = Spool(self.path.parent / 'publication-spool')
+            return {entry['path']: spool.read(entry) for entry in entries}, parent
         return {name: bytes.fromhex(value) for name, value in evidence["restore_payloads"].items()}, parent
 
     def _restoration_authority(self, release_id, repo_id):

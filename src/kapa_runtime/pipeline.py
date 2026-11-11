@@ -638,6 +638,8 @@ def _retained_owners(settings, store, repo_id, *, as_of=None, tombstones=None,
                 removed.add(evidence['removed_path'])
         from .releases.snapshot import inventory, published_digest
         entries = inventory(manifest, settings.snapshots_dir / release_id)
+        entries = entries + [dict(path=r['path'], sha256=r['sha256'], rows=0)
+                             for r in manifest.get('coverage_shards', [])]
         for entry in entries:
             if entry['path'].startswith('data/observations/'):
                 from .releases.manifest_v2 import resolve_snapshot
@@ -782,10 +784,12 @@ def _restore_public(settings, store, release_id, api):
     if pending is None:
         outstanding = store.pending_promotions()
         if not outstanding:
+            if store._connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='batch_publications'").fetchone():
+                _require(not store._connection.execute('SELECT 1 FROM batch_publications').fetchone(),
+                         'batch_publication_recovery_required')
             return
         release_id = outstanding[0]
         pending = store.promotion(release_id)
-    payloads = {name: bytes.fromhex(value) for name, value in pending["restore_payloads"].items()}
     target = settings.hf_namespace + "/" + settings.hf_repos["market"]
     _require(target == pending["repo_id"], "promotion_target_changed")
     expected = pending.get("public_commit_sha")
@@ -793,6 +797,7 @@ def _restore_public(settings, store, release_id, api):
              "public_recovery_expected_head_required")
     authority = store._restoration_authority(release_id, target)
     publisher = _publisher(settings, api, restoration=authority)
+    payloads, _ = authority._inventory(target)
     sha = publisher._restore_journal()
     pending["public_commit_sha"] = sha
     store.save_promotion(release_id, pending)
@@ -800,9 +805,12 @@ def _restore_public(settings, store, release_id, api):
     publisher._require_head(sha)
     row = store.get_release(release_id)
     if row["state"] not in ("quarantined", "failed"):
-        store.transition_release(release_id, "quarantined", {"reason": "public_promotion_restored",
+        store.transition_release(release_id, "failed" if row['state'] == 'draft' else "quarantined", {"reason": "public_promotion_restored",
                                  "restore_commit_sha": sha, "repo_id": publisher.repo_id})
     store.finish_promotion(release_id)
+    if 'restore_inventory' in pending:
+        store._connection.execute("UPDATE collection_jobs SET state='blocked' WHERE job_id=?", (release_id,))
+        store._connection.execute('DELETE FROM batch_publications WHERE job_id=?', (release_id,))
     raise PipelineError("public_promotion_restored_quarantined")
 
 
