@@ -288,3 +288,14 @@ def test_different_policy_cannot_resume(setup):
     policy.write_text(json.dumps(value))
     with pytest.raises(a.p.PipelineError, match='job_binding_changed'):
         a.collect_batch(setup, job_id='bound', clock=lambda: NOW)
+
+
+def test_unknown_provider_field_stops_as_schema_drift(setup):
+    item = (b'<item><dealYear>2026</dealYear><dealMonth>11</dealMonth><dealDay>1</dealDay>'
+            b'<futureProviderField>unexpected</futureProviderField></item>')
+    payload = ZERO.replace(b'<items/>', b'<items>' + item + b'</items>').replace(
+        b'<totalCount>0</totalCount>', b'<totalCount>1</totalCount>')
+    with client(lambda _: httpx.Response(200, content=payload)) as http:
+        result = a.collect_batch(setup, job_id='drift', client=http, clock=lambda: NOW)
+    assert result['state'] == 'blocked'
+    assert result['error_code'] == 'schema_blocked'

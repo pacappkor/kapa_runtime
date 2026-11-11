@@ -229,7 +229,10 @@ def _save_result(settings, store, result, job, code, month, attempt, secrets):
     p._require(obs.coverage.get("complete") is True and obs.pages_received == obs.pages_expected
                == len(pages) and [v.page_no for v in result.pages] == list(range(1, len(pages) + 1)),
                "verification_failed")
-    records = normalize(result, transaction_type=obs.service_id.rsplit("-", 1)[1])
+    normalization_warnings = []
+    records = normalize(result, transaction_type=obs.service_id.rsplit("-", 1)[1],
+                        warnings=normalization_warnings)
+    p._require(not normalization_warnings, "schema_blocked")
     p._require(len(records) == obs.count and (str(obs.status) == "zero") == (len(records) == 0),
                "verification_failed")
     root.mkdir(parents=True, exist_ok=True)
