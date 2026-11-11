@@ -575,7 +575,8 @@ def _trusted_published_manifest(settings, store, release_id, *, path=None):
     return manifest
 
 
-def _retained_owners(settings, store, repo_id, *, as_of=None, tombstones=None):
+def _retained_owners(settings, store, repo_id, *, as_of=None, tombstones=None,
+                     historical_evidence=None):
     cutoff = None
     if as_of is not None:
         _trusted_published_manifest(settings, store, as_of)
@@ -687,6 +688,8 @@ def _retained_owners(settings, store, repo_id, *, as_of=None, tombstones=None):
         owners.pop(name, None)
     if tombstones is not None:
         tombstones.update(withdrawn)
+    if historical_evidence is not None:
+        historical_evidence.update(immutable_evidence)
     return owners, active_id
 
 
@@ -697,9 +700,23 @@ def _previous_repo_files(settings, store, repo_id, *, as_of=None):
 
 
 def _promotion_retained_files(settings, store, staging_repo, public_repo):
-    staging_owners, _ = _retained_owners(settings, store, staging_repo)
-    tombstones = set()
-    public_owners, _ = _retained_owners(settings, store, public_repo, tombstones=tombstones)
+    staging_evidence, public_evidence = {}, {}
+    staging_tombstones, tombstones = set(), set()
+    staging_owners, _ = _retained_owners(
+        settings, store, staging_repo, tombstones=staging_tombstones,
+        historical_evidence=staging_evidence)
+    public_owners, _ = _retained_owners(
+        settings, store, public_repo, tombstones=tombstones,
+        historical_evidence=public_evidence)
+    # Compare full histories before withdrawals can hide contradictory evidence.
+    for name in staging_evidence.keys() | public_evidence.keys():
+        if name in staging_evidence and name in public_evidence:
+            _require(staging_evidence[name] == public_evidence[name],
+                     'immutable_path_conflict')
+    # Immutable withdrawals apply across the union; mutable paths retain the
+    # historical destination-only precedence below.
+    tombstones.update(name for name in staging_tombstones
+                      if name.startswith('data/observations/'))
     for name, owner in public_owners.items():
         if name.startswith('data/observations/') and name in staging_owners:
             _require(staging_owners[name] == owner, 'immutable_path_conflict')

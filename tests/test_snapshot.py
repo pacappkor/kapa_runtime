@@ -257,6 +257,49 @@ def test_promotion_retained_duplicate_evidence(monkeypatch, conflict):
             dict(entry, data_schema_version=a['data_schema_version'])]
 
 
+@pytest.mark.parametrize('withdrawn_repo', ['test/staging', 'test/public'])
+@pytest.mark.parametrize('conflict', [False, True])
+def test_promotion_checks_withdrawn_history(tmp_path, monkeypatch, withdrawn_repo, conflict):
+    from types import SimpleNamespace
+    from kapa_runtime.pipeline import _promotion_retained_files, PipelineError
+
+    a = root()
+    a['hugging_face_revisions'] = [
+        {'repo_id': repo, 'commit_sha': 'a' * 40}
+        for repo in (['test/staging'] if conflict else ['test/staging', 'test/public'])]
+    manifests = {'A': a}
+    if conflict:
+        b = copy.deepcopy(a)
+        b['release_id'] = 'B'
+        b['hugging_face_revisions'] = [{'repo_id': 'test/public', 'commit_sha': 'b' * 40}]
+        for partition in b['selected_partitions']:
+            partition['producer_release_id'] = 'B'
+        manifests['B'] = b
+    name = a['selected_partitions'][0]['files'][0]['path']
+    rows = []
+    for rid, manifest in manifests.items():
+        events = [{'state': 'published', 'at': rid, 'evidence': {
+            'commit_reread': True, 'published_manifest_sha256': manifest_digest(manifest)}}]
+        if any(ref['repo_id'] == withdrawn_repo for ref in manifest['hugging_face_revisions']):
+            events.append({'state': 'published', 'at': rid, 'evidence': {
+                'reason': 'retained_partition_removed', 'repo_id': withdrawn_repo,
+                'removed_path': name}})
+        rows.append({'release_id': rid, 'state': 'published', 'guard_evidence': events})
+    store = SimpleNamespace(list_releases=lambda: rows,
+                            get_release=lambda rid: next(r for r in rows if r['release_id'] == rid))
+    settings = SimpleNamespace(active_manifest=tmp_path / 'absent', snapshots_dir=tmp_path)
+    monkeypatch.setattr('kapa_runtime.pipeline._trusted_published_manifest',
+                        lambda settings, store, rid: manifests[rid])
+    if conflict:
+        with pytest.raises(PipelineError, match='^immutable_path_conflict$'):
+            _promotion_retained_files(settings, store, 'test/staging', 'test/public')
+    else:
+        retained = _promotion_retained_files(settings, store, 'test/staging', 'test/public')
+        assert name not in {entry['path'] for entry in retained}
+        other = a['selected_partitions'][1]['files'][0]['path']
+        assert other in {entry['path'] for entry in retained}
+
+
 def test_materialize_checks_complete_inventory(tmp_path):
     from kapa_runtime.releases.snapshot import materialize
     from kapa_runtime.storage.parquet import write_partition
