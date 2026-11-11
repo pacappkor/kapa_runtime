@@ -13,6 +13,16 @@ from .manifest_v2 import (KEY, assemble_partitions, coverage_for_partitions, key
 from ..storage.parquet import _safe_path
 
 
+def _unique_evidence(values, identity, message):
+    """Collapse only identical evidence, before any normalization can hide conflicts."""
+    indexed = {}
+    for value in values:
+        name = identity(value)
+        require(name not in indexed or indexed[name] == value, message)
+        indexed[name] = value
+    return indexed
+
+
 def published_digest(store, release_id):
     row = store.get_release(release_id)
     evidence = [e['evidence'] for e in row['guard_evidence']
@@ -51,6 +61,8 @@ def assemble_snapshot(template, parent, batch, *, trusted_digests, origins,
     require(resolve_snapshot(original, loader) == parent, 'Parent evidence mismatch')
     inherited = copy.deepcopy(parent.get('selected_partitions', legacy_partitions))
     require(isinstance(inherited, list), 'Legacy partition evidence required')
+    inherited = list(_unique_evidence(inherited, key, 'Conflicting inherited partition evidence').values())
+    batch = list(_unique_evidence(batch, key, 'Conflicting batch partition evidence').values())
     if parent['schema_version'] == 'kapa-runtime-release/1':
         require(sorted([f for p in inherited for f in p['files']], key=lambda f: f['path']) ==
                 sorted([f for f in parent['files'] if f['path'].startswith('data/')], key=lambda f: f['path']),
@@ -81,7 +93,7 @@ def assemble_snapshot(template, parent, batch, *, trusted_digests, origins,
             p['previous_observation'] = dict(observation_id=previous['observation_id'],
                 producer_release_id=previous['producer_release_id'], digest=previous['origin_digest'])
     selected = assemble_partitions(inherited, batch)
-    physical = {f['path']: f for f in retained}
+    physical = _unique_evidence(retained, lambda f: f['path'], 'Conflicting retained path evidence')
     for p in inherited + batch:
         for f in p['files']:
             require(f['path'] not in physical or physical[f['path']] == f, 'Immutable path conflict')

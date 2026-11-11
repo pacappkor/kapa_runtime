@@ -607,6 +607,7 @@ def _retained_owners(settings, store, repo_id, *, as_of=None, tombstones=None):
             preferred = row['release_id'] == required_id
             published.append((preferred, order[0], row["release_id"], manifest))
     owners = {}
+    immutable_evidence = {}
     for _, _, release_id, manifest in sorted(published):
         row = store.get_release(release_id)
         removed = set()
@@ -644,13 +645,20 @@ def _retained_owners(settings, store, repo_id, *, as_of=None, tombstones=None):
                 producer = partition['producer_release_id']
                 if producer != release_id:
                     origin = _trusted_published_manifest(settings, store, producer)
-                    _require(partition['origin_digest'] == published_digest(store, producer)
-                             and entry in inventory(origin, settings.snapshots_dir / producer),
+                    bound = published_digest(store, producer)
+                    resolved_origin = resolve_snapshot(origin, lambda name: read_metadata(
+                        settings.snapshots_dir / producer / relative_path(name), as_bytes=True))
+                    _require(partition['origin_digest'] == bound
+                             and any({**p, 'origin_digest': bound} == partition
+                                     for p in resolved_origin.get('selected_partitions', [])),
                              'retained_origin_untrusted')
                 else:
                     origin = manifest
-                previous = owners.get(entry['path'])
-                _require(previous is None or previous[2] == entry, 'immutable_path_conflict')
+                # Keep evidence even after withdrawal: removal must not erase a conflict.
+                evidence = {**partition, 'origin_digest': published_digest(store, producer)}
+                previous = immutable_evidence.get(entry['path'])
+                _require(previous is None or previous == evidence, 'immutable_path_conflict')
+                immutable_evidence[entry['path']] = evidence
                 if entry['path'] not in removed:
                     owners[entry['path']] = (producer, origin, entry)
                 else:
@@ -689,11 +697,15 @@ def _previous_repo_files(settings, store, repo_id, *, as_of=None):
 
 
 def _promotion_retained_files(settings, store, staging_repo, public_repo):
-    retained = {e['path']: e for e in _previous_repo_files(settings, store, staging_repo)}
+    staging_owners, _ = _retained_owners(settings, store, staging_repo)
     tombstones = set()
     public_owners, _ = _retained_owners(settings, store, public_repo, tombstones=tombstones)
-    retained.update({name: dict(entry, data_schema_version=manifest['data_schema_version'])
-                     for name, (_, manifest, entry) in public_owners.items()})
+    for name, owner in public_owners.items():
+        if name.startswith('data/observations/') and name in staging_owners:
+            _require(staging_owners[name] == owner, 'immutable_path_conflict')
+    combined = {**staging_owners, **public_owners}
+    retained = {name: dict(entry, data_schema_version=manifest['data_schema_version'])
+                for name, (_, manifest, entry) in combined.items()}
     # Destination removals must delete staging keys, not merely omit public keys.
     for name in tombstones:
         retained.pop(name, None)

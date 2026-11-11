@@ -56,6 +56,38 @@ def test_conflict_and_tombstone(tmp_path):
         assemble(a, 'B', batch, {'A': a}, retained=retained)
 
 
+@pytest.mark.parametrize('field,value', [
+    ('sha256', 'f' * 64), ('rows', 2), ('schema', 'different'),
+    ('producer_release_id', 'other'), ('origin_digest', 'f' * 64),
+])
+@pytest.mark.parametrize('reverse', [False, True])
+def test_retained_duplicate_conflicts(field, value, reverse):
+    a = root()
+    batch = partitions('B', '26110')
+    entry = copy.deepcopy(batch[0]['files'][0])
+    conflicting = {**entry, field: value}
+    retained = [conflicting, entry] if reverse else [entry, conflicting]
+    with pytest.raises(ManifestError, match='Conflicting retained path evidence'):
+        assemble(a, 'B', batch, {'A': a}, retained=retained)
+
+
+def test_identical_evidence_duplicates():
+    a = root()
+    batch = partitions('B', '26110')
+    entry = batch[0]['files'][0]
+    assert assemble(a, 'B', batch + [copy.deepcopy(batch[0])], {'A': a},
+                    retained=[entry, copy.deepcopy(entry)]) == assemble(a, 'B', batch, {'A': a})
+
+
+def test_batch_duplicates_checked_before_previous_observation_overwrite():
+    a = root()
+    batch = partitions('B')
+    conflict = copy.deepcopy(batch[0])
+    conflict['previous_observation'] = {'observation_id': 'forged'}
+    with pytest.raises(ManifestError, match='Conflicting batch partition evidence'):
+        assemble(a, 'B', batch + [conflict], {'A': a})
+
+
 def test_parent_guards():
     a = root()
     class Ledger:
@@ -83,6 +115,13 @@ def test_legacy_bootstrap():
     b = assemble(legacy, 'B', partitions('B', '26110'), {'legacy': legacy}, legacy_partitions=parts)
     assert b['selected_partitions'][0]['files'] == parts[0]['files']
     assert b['selected_partitions'][0]['producer_release_id'] == 'legacy'
+    assert assemble(legacy, 'B', partitions('B', '26110'), {'legacy': legacy},
+                    legacy_partitions=parts + [copy.deepcopy(parts[0])]) == b
+    conflicting = copy.deepcopy(parts[0])
+    conflicting['run_id'] = 'forged'
+    with pytest.raises(ManifestError, match='Conflicting inherited partition evidence'):
+        assemble(legacy, 'B', partitions('B', '26110'), {'legacy': legacy},
+                 legacy_partitions=parts + [conflicting])
 
 
 def test_rollback_after_reobservation(tmp_path):
@@ -150,6 +189,72 @@ def test_retained_physical_owner_and_tombstone(tmp_path, monkeypatch):
         assert old not in owners and old in tombstones
         assert old not in {f['path'] for f in _promotion_retained_files(
             settings, store, 'test/staging', 'test/repo')}
+
+
+@pytest.mark.parametrize('withdrawn', [False, True])
+@pytest.mark.parametrize('change', ['digest', 'producer', 'run'])
+def test_retained_owner_conflicting_evidence(tmp_path, monkeypatch, withdrawn, change):
+    from types import SimpleNamespace
+    from kapa_runtime.pipeline import _retained_owners, PipelineError
+    a = root()
+    b = copy.deepcopy(a)
+    b['release_id'] = 'B'
+    if change == 'producer':
+        for p in b['selected_partitions']:
+            p['producer_release_id'] = 'B'
+    else:
+        b = assemble(a, 'B', partitions('B', '26110'), {'A': a})
+        p = b['selected_partitions'][0]
+        if change == 'digest':
+            p['files'][0]['sha256'] = 'f' * 64
+        else:
+            p['run_id'] = 'forged'
+    manifests = {'A': a, 'B': b}
+    rows = []
+    for rid, m in manifests.items():
+        m['hugging_face_revisions'] = [{'repo_id': 'test/repo', 'commit_sha': 'a' * 40}]
+    # Bind inherited partitions after the publication metadata is finalized.
+    for p in b['selected_partitions']:
+        if p['producer_release_id'] == 'A':
+            p['origin_digest'] = manifest_digest(a)
+    for rid, m in manifests.items():
+        events = [{'state': 'published', 'at': rid, 'evidence': {
+            'commit_reread': True, 'published_manifest_sha256': manifest_digest(m)}}]
+        if withdrawn and rid == 'A':
+            events.append({'state': 'published', 'at': 'A', 'evidence': {
+                'reason': 'retained_partition_removed', 'repo_id': 'test/repo',
+                'removed_path': a['selected_partitions'][0]['files'][0]['path']}})
+        rows.append({'release_id': rid, 'state': 'published', 'guard_evidence': events})
+    store = SimpleNamespace(list_releases=lambda: rows,
+                            get_release=lambda rid: next(r for r in rows if r['release_id'] == rid))
+    settings = SimpleNamespace(active_manifest=tmp_path / 'absent', snapshots_dir=tmp_path)
+    monkeypatch.setattr('kapa_runtime.pipeline._trusted_published_manifest',
+                        lambda settings, store, rid: manifests[rid])
+    with pytest.raises(PipelineError, match='immutable_path_conflict|retained_origin_untrusted'):
+        _retained_owners(settings, store, 'test/repo')
+
+
+@pytest.mark.parametrize('conflict', [None, 'digest', 'schema', 'producer'])
+def test_promotion_retained_duplicate_evidence(monkeypatch, conflict):
+    from kapa_runtime.pipeline import _promotion_retained_files, PipelineError
+    a = root()
+    entry = a['selected_partitions'][0]['files'][0]
+    owner = ('A', a, entry)
+    other = copy.deepcopy(owner)
+    if conflict == 'digest':
+        other[2]['sha256'] = 'f' * 64
+    elif conflict == 'schema':
+        other[1]['data_schema_version'] = 'kapa-runtime-data/1'
+    elif conflict == 'producer':
+        other = ('B', other[1], other[2])
+    monkeypatch.setattr('kapa_runtime.pipeline._retained_owners',
+        lambda settings, store, repo, **kwargs: ({entry['path']: owner if repo == 'staging' else other}, None))
+    if conflict:
+        with pytest.raises(PipelineError, match='immutable_path_conflict'):
+            _promotion_retained_files(None, None, 'staging', 'public')
+    else:
+        assert _promotion_retained_files(None, None, 'staging', 'public') == [
+            dict(entry, data_schema_version=a['data_schema_version'])]
 
 
 def test_materialize_checks_complete_inventory(tmp_path):
