@@ -9,6 +9,6 @@ permissions:
   contents: write
 jobs:
   count:
-    uses: pacappkor/.github/.github/workflows/traffic-count.yml@main
+    uses: pacappkor/.github/.github/workflows/traffic-count.yml@5e53464a8b02054d15146b1719d7de6f36201b34 # reviewed central commit; bump explicitly
     secrets:
       TRAFFIC_TOKEN: ${{ secrets.TRAFFIC_TOKEN }}
