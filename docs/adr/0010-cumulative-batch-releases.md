@@ -63,3 +63,27 @@ code.go.kr 전체자료의 active 10자리 코드에서 5자리 prefix를 생성
 2단계는 opt-in snapshot 조립, ledger publication digest 기반 origin 검증, parent 비교, write-once, SQLite schema 3(parent/batch members/partition evidence), 전체 선택 inventory 검증 및 v2 activation/rollback 지원을 추가한다. 기본 v1 CLI는 유지한다. v2 게시 orchestration/final envelope와 게시 직전 check_parent 연결은 미완료이며 v1 publish에 v2를 전달하지 않는다. HF delta/spool, quota scheduler, CLI, query/MCP, bootstrap 실행은 후속 단계다. 실제 수집·네트워크·게시도 하지 않는다.
 
 현재 조립 API는 parent digest 비교와 published-but-not-active 차단을 제공한다. 다음 통합 작업은 v2 게시 직전에 이 guard를 다시 호출하고 end-to-end fake-HF 검증을 추가하는 것이다. schema 3 migration은 첫 누적 snapshot 기록 때만 실행하여 기본 v1 장부 동작을 유지한다. 미해결 journal·commit 결과 불명·head/visibility drift는 전역 중지 사유다. local rollback과 public current rollback은 별개이며 기존 head 제공·workspace guard를 유지한다. 이후 quota/jobs, delta/spool, manifest-aware query, migration과 수동 smoke 순으로 통합한다.
+
+### 5 query/MCP implementation (issue #7)
+
+The ACTIVE reader now resolves v2 current inventory through the common resolver,
+using digest-bound flat shard bytes and no directory glob. Ledger publication
+binding and full-current-inventory pre/post verification remain mandatory. Archived
+observations outside current inventory are intentionally neither queried nor verified;
+this is not an archive integrity audit. Selected data is checked against validated
+partition metadata before pruning can be trusted. v1 behavior remains supported.
+
+Arrow Dataset scanners feed fresh bounded readers into bound-parameter DuckDB
+count/page queries. Projection/filter pushdown and region/service/month pruning
+avoid Python-wide row materialization. Batches are 4096 rows, readahead is bounded,
+and DuckDB working memory is capped at 256 MB with external access disabled.
+Global ordering includes all response fields as tie-breakers; exact duplicate rows
+retain multiplicity. Deep offset queries may fail at the engine memory limit.
+
+Portable unsigned cursors bind root manifest digest, canonical filters, ordering,
+and offset. Root provenance changes invalidate cursors even with identical data.
+The read-only `get_data_coverage` tool paginates exact K unions and returns set
+membership, zero/gaps, producer/observation provenance and explicit unknown
+staleness (no unapproved SLA). Full inventory verification costs remain intentional;
+reducing them requires a separate decision. Publication/bootstrap integration and
+real-data smoke remain subsequent orchestration responsibilities.

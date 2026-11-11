@@ -1,0 +1,121 @@
+# SPDX-License-Identifier: GPL-3.0-only
+"""Explicit, digest-bound cumulative inventory and bounded local verification."""
+from __future__ import annotations
+
+from datetime import date
+import hashlib
+import copy
+from pathlib import Path
+
+import pyarrow.dataset as ds
+import pyarrow.parquet as pq
+
+from ..releases.manifest import manifest_digest, relative_path
+from ..releases.manifest_v2 import COVERAGE, KEY, resolve_snapshot, resolve_snapshot_inventory
+from .metadata import read_metadata
+from .parquet import _safe_path, schema_for
+
+BATCH_SIZE = 4096
+
+
+def file_digest(path):
+    _safe_path(path)
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def verify_files(root, entries, version, partitions=()):
+    """Stream bytes and decoded batches; never collect a complete file in Python."""
+    owners = {f['path']: p for p in partitions for f in p['files']}
+    for entry in entries:
+        path = Path(root) / relative_path(entry['path'])
+        _safe_path(path)
+        if file_digest(path) != entry['sha256']:
+            raise ValueError('local_hash_mismatch')
+        if path.suffix != '.parquet':
+            continue
+        parquet = pq.ParquetFile(path)
+        if not parquet.schema_arrow.equals(schema_for(version), check_metadata=True):
+            raise ValueError('schema_mismatch')
+        count = 0
+        owner = owners.get(entry['path'])
+        columns = ['asset_type', 'transaction_type', 'lawd_code', 'contract_date', 'observation_id']
+        for batch in parquet.iter_batches(batch_size=BATCH_SIZE, use_threads=False):
+            count += batch.num_rows
+            if owner is not None:
+                for row in batch.select(columns).to_pylist():
+                    month = row['contract_date']
+                    if (row['asset_type'] != 'apartment' or
+                            row['transaction_type'] != owner['service_id'].removeprefix('molit-apartment-') or
+                            row['lawd_code'] != owner['lawd_code'] or
+                            row['observation_id'] != owner['observation_id'] or
+                            (month is not None and month.strftime('%Y%m') != owner['deal_ymd'])):
+                        raise ValueError('partition_metadata_mismatch')
+        if count != entry['rows']:
+            raise ValueError('row_count_mismatch')
+
+
+def overlaps(partition, filters):
+    """Only prune on validated K metadata, never infer a Cartesian coverage."""
+    if filters.get('asset_type', 'apartment') != 'apartment':
+        return False
+    for name in ('lawd_code', 'service_id'):
+        if name in filters and filters[name] != partition[name]:
+            return False
+    if ('transaction_type' in filters and filters['transaction_type'] !=
+            partition['service_id'].removeprefix('molit-apartment-')):
+        return False
+    for name, lower in (('contract_date_from', True), ('contract_date_to', False)):
+        if name in filters:
+            value = filters[name]
+            if isinstance(value, str):
+                value = date.fromisoformat(value)
+            month = value.strftime('%Y%m')
+            if (lower and partition['deal_ymd'] < month) or (not lower and partition['deal_ymd'] > month):
+                return False
+    return True
+
+
+class SnapshotInventory:
+    def __init__(self, root, manifest):
+        self.root = Path(root)
+        manifest = copy.deepcopy(manifest)
+        self.manifest = manifest
+        self.digest = manifest_digest(manifest)
+        # Cache bounded shard bytes so both common resolvers see exactly one capture.
+        shards = {}
+        def load(name):
+            if name not in shards:
+                path = self.root / relative_path(name)
+                _safe_path(path)
+                shards[name] = read_metadata(path, as_bytes=True)
+            return shards[name]
+        self.entries = resolve_snapshot_inventory(manifest, load)
+        self.resolved = resolve_snapshot(manifest, load)
+        self.partitions = self.resolved['selected_partitions']
+        self.shards = [dict(path=r['path'], sha256=r['sha256'], rows=0)
+                       for r in manifest['coverage_shards']]
+
+    def verify(self, entries=None):
+        verify_files(self.root, self.entries + self.shards if entries is None else entries,
+                     self.manifest['data_schema_version'], self.partitions)
+
+    def select(self, filters):
+        return [p for p in self.partitions if overlaps(p, filters)]
+
+    def dataset(self, partitions):
+        paths = [str(self.root / f['path']) for p in partitions for f in p['files']]
+        return ds.dataset(paths, schema=schema_for(self.manifest['data_schema_version']), format='parquet')
+
+    def coverage(self, filters):
+        cov = {name: [p for p in self.resolved['coverage'][name] if overlaps(p, filters)]
+               for name in sorted(COVERAGE)}
+        cov.update(complete=not cov['not_collected'], scope='exact-service-region-month-sets',
+                   gaps_overlapping_query=cov['not_collected'],
+                   stale={'status': 'unknown', 'reason': 'No freshness SLA is asserted; inspect fetched_at.'})
+        return cov
+
+    def provenance(self, partitions):
+        return [{name: p[name] for name in sorted(KEY | {
+            'producer_release_id', 'origin_digest', 'observation_id', 'run_id',
+            'fetched_at', 'status', 'evidence_digest', 'previous_observation'})} for p in partitions]

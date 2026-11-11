@@ -14,7 +14,7 @@ from mcp.types import ToolAnnotations
 from ..config import ConfigurationError, RuntimeSettings
 from ..registry import ServiceRegistry
 from ..releases.manifest import manifest_digest
-from ..storage.active import ActiveSnapshotError, search_active
+from ..storage.active import ActiveSnapshotError, search_active, coverage_active
 
 
 def envelope(status, data=None, *, manifest=None, result=None):
@@ -27,6 +27,10 @@ def envelope(status, data=None, *, manifest=None, result=None):
                        "manifest_sha256": manifest_digest(manifest) if manifest else None,
                        "hugging_face_revisions": refs},
         "snapshot_refs": refs,
+        "partition_provenance": result.get("partition_provenance", []),
+        "excluded": result.get("excluded", {"count": 0, "reason": None}),
+        "verification": result.get("verification", {}),
+        "limitations": result.get("limitations", ["Coverage is not a legal verification."]),
         "coverage": {"release": manifest["coverage"], "query": result.get("coverage", {})} if manifest else {},
         "warnings": result.get("warnings", []),
         "unresolved_gaps": manifest["unresolved_gaps"] if manifest else [],
@@ -77,6 +81,27 @@ def create_server(settings: RuntimeSettings) -> MCPServer:
                                              limit=limit, cursor=cursor)
             return envelope("ok" if result["total"] else "no_data", result,
                             manifest=manifest, result=result)
+        except ActiveSnapshotError as exc:
+            code = str(exc)
+            return envelope("no_active_release" if code == "no_active_release" else "error",
+                            {"error_code": code})
+        except (ValueError, TypeError, InvalidOperation, OverflowError):
+            return envelope("error", {"error_code": "invalid_query"})
+        except Exception:
+            return envelope("error", {"error_code": "query_failed"})
+
+    @server.tool(annotations=read)
+    def get_data_coverage(filters: dict | None = None, limit: int = 100,
+                          cursor: str | None = None) -> dict:
+        """Read exact ACTIVE coverage keys, zero/gaps and observation provenance.
+
+        Filters: service_id, lawd_code, contract_date_from/to. Pages contain at most
+        limit distinct keys (1..1000), not a Cartesian product. Digest-bound cursor.
+        Staleness is unknown without a freshness SLA; fetched_at is preserved.
+        """
+        try:
+            manifest, result = coverage_active(settings, filters, limit=limit, cursor=cursor)
+            return envelope("ok", result, manifest=manifest, result=result)
         except ActiveSnapshotError as exc:
             code = str(exc)
             return envelope("no_active_release" if code == "no_active_release" else "error",

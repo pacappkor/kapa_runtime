@@ -93,7 +93,7 @@ def test_official_in_memory_protocol(active):
     async def exercise():
         async with Client(create_server(active), mode="legacy") as client:
             tools = await client.list_tools()
-            assert {tool.name for tool in tools.tools} == {"list_data_capabilities", "search_transactions"}
+            assert {tool.name for tool in tools.tools} == {"list_data_capabilities", "search_transactions", "get_data_coverage"}
             assert all(t.annotations.read_only_hint and not t.annotations.open_world_hint for t in tools.tools)
             caps = unpack(await client.call_tool("list_data_capabilities", {}))
             assert caps["status"] == "ok"
@@ -136,7 +136,7 @@ def test_stdio_protocol(active, tmp_path):
             args=["-I", "-B", "-m", "kapa_runtime.mcp.server"],
             env={"KAPA_RUNTIME_CONFIG": str(config)})
         async with Client(params, mode="legacy", read_timeout_seconds=60) as client:
-            assert len((await client.list_tools()).tools) == 2
+            assert len((await client.list_tools()).tools) == 3
             assert unpack(await client.call_tool("list_data_capabilities", {}))["status"] == "ok"
             assert unpack(await client.call_tool("search_transactions", {}))["data"]["total"] == 2
     asyncio.run(exercise())
@@ -162,7 +162,7 @@ sys.addaudithook(no_external_access)
 import json
 async def run():
     async with Client(create_server(RuntimeSettings(Path(sys.argv[1]), Path(sys.argv[2]))), mode="legacy") as c:
-        for tool in ("list_data_capabilities", "search_transactions"):
+        for tool in ("list_data_capabilities", "search_transactions", "get_data_coverage"):
             result = await c.call_tool(tool, {})
             assert not result.is_error
             assert json.loads(result.content[0].text)["status"] == "ok"
