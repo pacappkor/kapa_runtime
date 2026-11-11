@@ -37,7 +37,7 @@ def published_digest(store, release_id):
     return value
 
 
-def check_parent(store, parent, *, active_path):
+def check_parent(store, parent, *, active_path, publication_job=None):
     """Read the current pointer under the writer lock, never a caller's cached manifest."""
     from .activate import load_manifest
     require(store._lock_fd is not None, 'StateStore writer lock required')
@@ -50,6 +50,10 @@ def check_parent(store, parent, *, active_path):
     require(not any(r['state'] == 'published' for r in store.list_releases()),
             'Published-but-not-active release exists')
     require(not store.pending_promotions(), 'Unresolved publication journal')
+    if getattr(store, '_connection', None) is not None and store._connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='batch_publications'").fetchone():
+        pending = {r[0] for r in store._connection.execute('SELECT job_id FROM batch_publications')}
+        require(not pending - {publication_job}, 'Unresolved publication journal')
 
 
 def _owned_pairs(block):

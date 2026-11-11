@@ -520,12 +520,30 @@ def _freeze(settings, store, job, data, parent, resolved, parent_root, secrets, 
     manifest = build_snapshot(store, template, parent, parts, active_path=settings.active_manifest,
                               origins=origins, loader=load_origin, tombstones=removed,
                               shard_payloads=shard_payloads, enabled=True)
+    # Freeze a manifest-aware default config; archive observations are never
+    # included by a wildcard in the public dataset's default view.
+    from .releases.manifest_v2 import resolve_snapshot_inventory
+    entries = resolve_snapshot_inventory(manifest, lambda name: shard_payloads.get(name) or load_origin(name))
+    paths = [f['path'] for f in entries if f['path'].endswith('.parquet')]
+    card = ('---\nlanguage: [ko]\nconfigs:\n- config_name: default\n  data_files:\n'
+            '  - split: train\n    path:\n' + ''.join('    - ' + json.dumps(name) + '\n' for name in paths)
+            + '---\n# Cumulative market observations\n\n'
+            'Only selected observations are included in the default view. Historical observations '
+            'are retained, not duplicate current records. Use manifests/release.json for exact '
+            'coverage and provenance. Partial addresses; cancellations are preserved. '
+            'legal_verified=false. Raw responses and logs are not published.\n')
+    card_payload = card.encode('utf-8')
+    scan_secret_payload(card_payload, 'README.md', secrets)
+    manifest['files'].append(dict(path='README.md', sha256=hashlib.sha256(card_payload).hexdigest(), rows=0))
+    manifest['files'].sort(key=lambda f: f['path'])
     scan_secret_payload(json.dumps(manifest, default=str).encode(), "release.json", secrets)
     for name, payload in shard_payloads.items():
         scan_secret_payload(payload, name, secrets)
     new_paths = {f["path"] for part in parts for f in part["files"]}
     destination = settings.snapshots_dir / job
     def load(name):
+        if name == 'README.md':
+            return card_payload
         if name in shard_payloads:
             return shard_payloads[name]
         return _load(root if name in new_paths else parent_root, name)
@@ -538,5 +556,6 @@ def _freeze(settings, store, job, data, parent, resolved, parent_root, secrets, 
     manifest_path = settings.manifests_dir / (job + ".json")
     _safe_path(manifest_path)
     _atomic_write(manifest_path, dumps_manifest(manifest).encode("utf-8"))
-    store._connection.execute("UPDATE collection_jobs SET state='built' WHERE job_id=?", (job,))
+    data['snapshot_digest'] = manifest_digest(manifest)
+    store._connection.execute("UPDATE collection_jobs SET state='built',data=? WHERE job_id=?", (_dump(data), job))
     return {"state": "validated", "pairs": len(parts) // 2, "bytes": total}

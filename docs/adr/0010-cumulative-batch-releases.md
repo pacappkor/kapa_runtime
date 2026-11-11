@@ -60,9 +60,9 @@ code.go.kr 전체자료의 active 10자리 코드에서 5자리 prefix를 생성
 
 ## 비목표와 다음 단계
 
-2단계는 opt-in snapshot 조립, ledger publication digest 기반 origin 검증, parent 비교, write-once, SQLite schema 3(parent/batch members/partition evidence), 전체 선택 inventory 검증 및 v2 activation/rollback 지원을 추가한다. 기본 v1 CLI는 유지한다. v2 게시 orchestration/final envelope와 게시 직전 check_parent 연결은 미완료이며 v1 publish에 v2를 전달하지 않는다. HF delta/spool, quota scheduler, CLI, query/MCP, bootstrap 실행은 후속 단계다. 실제 수집·네트워크·게시도 하지 않는다.
+2단계는 opt-in snapshot 조립, ledger publication digest 기반 origin 검증, parent 비교, write-once, SQLite schema 3(parent/batch members/partition evidence), 전체 선택 inventory 검증 및 v2 activation/rollback 지원을 추가한다. 기본 v1 CLI는 유지한다. v2 게시 orchestration/final envelope와 게시 직전 check_parent는 아래 step 4에 통합한다. v1 publish에는 v2를 전달하지 않는다. bootstrap 실행과 운영 rollout은 후속 단계다. 실제 수집·네트워크·게시도 하지 않는다.
 
-현재 조립 API는 parent digest 비교와 published-but-not-active 차단을 제공한다. 다음 통합 작업은 v2 게시 직전에 이 guard를 다시 호출하고 end-to-end fake-HF 검증을 추가하는 것이다. schema 3 migration은 첫 누적 snapshot 기록 때만 실행하여 기본 v1 장부 동작을 유지한다. 미해결 journal·commit 결과 불명·head/visibility drift는 전역 중지 사유다. local rollback과 public current rollback은 별개이며 기존 head 제공·workspace guard를 유지한다. 이후 quota/jobs, delta/spool, manifest-aware query, migration과 수동 smoke 순으로 통합한다.
+현재 조립 API는 parent digest 비교와 published-but-not-active 차단을 제공한다. step 4는 v2 게시 직전에 이 guard를 다시 호출하고 end-to-end fake-HF 검증을 추가한다. schema 3 migration은 첫 누적 snapshot 기록 때만 실행하여 기본 v1 장부 동작을 유지한다. 미해결 journal·commit 결과 불명·head/visibility drift는 전역 중지 사유다. local rollback과 public current rollback은 별개이며 기존 head 제공·workspace guard를 유지한다. 이후 quota/jobs, delta/spool, manifest-aware query, migration과 수동 smoke 순으로 통합한다.
 
 ### 3b 실행 계층 (issue #5)
 
@@ -137,3 +137,50 @@ rejected, never truncated. The local step-3b writer uses UUID run/observation ID
 short parser versions, ISO timestamps and digests; its `quality.terms_evidence`
 shape remains supported with the explicit 4096-character `terms_basis` allowance.
 Operators must shorten longer terms text or reference separately stored evidence.
+
+### 4 publication implementation (issue #6)
+
+`publish-batch` consumes only a built collection job. The builder binds the exact
+candidate digest in job data and freezes a manifest-aware README whose default
+HF config enumerates only selected Parquet paths. Publication replays each batch
+member's original evidence, verifies the frozen selected snapshot, compares the
+snapshot selection ledger and reviewed terms, and takes the existing writer lock.
+`check_parent` runs again immediately before both staging and public commits.
+The existing v1 `publish` orchestration remains separate and unchanged in format.
+
+The v2 final envelope permits `staging_revision` only in published/active states;
+the final local manifest binds the candidate manifest file hash and public commit.
+The candidate itself contains neither its own hash nor its future commit.
+Promotion still requires the sealed private full-inventory verification report.
+All retained files and coverage shards remain hash-verified at pinned revisions.
+
+Delta planning compares frozen bytes to the pinned parent: unchanged paths create
+no operation, new/changed paths create Adds, and removals require explicit ledger
+tombstones after the staging/public ownership union. Immutable observation paths
+cannot be overwritten. Unexpected paths are refused rather than silently deleted.
+Caps apply per commit: 60 declared pairs, 512 MiB changed bytes, 500 operations.
+Dry-run reports bytes/ops/full-inventory files separately for staging and public;
+it requires existing repositories and performs read-only remote verification.
+
+Local `publication-spool` blobs are named by SHA-256 and fsynced before a durable
+SQLite publication journal is written. Journal descriptors contain path/hash/size/
+schema and bind expected parents and the full inventory digest, without hex
+payloads. Recovery opens regular no-follow files, checks size/hash, and rescans
+paths and contents with the current secret set. There is intentionally no spool
+GC. SQLite serializes writers; local operators remain within ADR-0008's trusted
+boundary. Windows fsyncs file content before an atomic same-volume link install;
+POSIX additionally fsyncs the containing directory.
+
+An attempted commit with a lost response is resolved against its exact frozen full
+inventory at the remote head, not resent. A changed head before an attempt, a
+mismatching tree, visibility drift, corrupt journal, or unverified restore stops
+publication. A known public verification failure uses the existing restore-only
+authority with spool descriptors; restore failure retains journals. Unresolved
+batch journals also block legacy publication/activation and collection. HTTP 429
+commits permit at most three attempts, respecting Retry-After up to 60 seconds;
+longer/invalid waits stop instead of retrying early.
+
+Successful publication records release guards and then marks the job published.
+Activation remains explicit (`activate --cumulative`); no public current-pointer
+rollback is implied by local rollback. Real publication is **not authorized by
+fake-HF tests**: an operator smoke test and reviewed rollout remain mandatory.
