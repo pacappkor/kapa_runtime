@@ -46,6 +46,146 @@ rollback은 이전 활성 릴리스가 있을 때만 실행한다. 최초 운영
 
 조회 결과의 `next_cursor`를 다음 호출의 `--cursor`로 전달하면 새 프로세스에서도 이어서 읽는다. 커서는 snapshot 해시·필터 해시·offset의 base64 JSON이며 서명이나 자격증명에 의존하지 않는다. 다른 snapshot/필터에는 거부한다. offset 변경은 이미 읽을 수 있는 같은 질의의 페이지 이동만 바꾸므로 권한을 부여하지 않는다. 이전 서명 커서는 호환되지 않으며 첫 페이지부터 다시 조회한다.
 
+## Multi-repository activation guard
+
+`workspace` is the parent of the sibling checkouts. Optional config fields:
+
+```json
+{
+  "sibling_repos": ["kapa_edu_1", "kapa_edu_2", "kapa_skills", "kapa_knowledge", "kapa_mcp"],
+  "required_repos": ["kapa_knowledge", "kapa_skills"],
+  "trusted_repo_owners": []
+}
+```
+
+These are the defaults. Names must be unique members of this fixed sibling list;
+required repositories must be included in `sibling_repos`. An explicit empty
+`required_repos` opts out of activation requirements and should be used only for
+isolated deployments that do not consume those inputs.
+
+Build records full HEAD SHAs under `github_revisions` as `pacappkor/<name>`,
+alongside kapa_runtime. Every present configured sibling must be a Git checkout
+with no staged, tracked or untracked changes (`workspace_repository_dirty`).
+Missing optional siblings are recorded as JSON null and reported in build
+`warnings` and manifest `quality.workspace_warnings` with code
+`workspace_repository_unavailable`; missing required siblings refuse build with
+`workspace_required_repository_unavailable`. A present non-Git/unreadable checkout
+refuses with `workspace_revision_unavailable`, not an optional-missing warning.
+Whenever knowledge is present, its JSON `deps.lock` must pin both
+`kapa_skills.commit` and `kapa_skills.vendor.commit` to the recorded skills HEAD;
+missing/invalid locks or divergent pins refuse with `workspace_dependency_mismatch`.
+There is no silent substitution of the latest revision.
+
+Activate and rollback require each currently configured required sibling to be
+clean and checked out at the target manifest's exact pinned HEAD. Having that
+object elsewhere in the local Git object store is not sufficient. Missing pins
+(including old manifests), absent repositories, dirty trees and different HEADs
+refuse with `error_code: workspace_revision_mismatch` and leave the active pointer
+unchanged. The operator must check out the manifest's pinned combination, confirm
+the knowledge lock pair, clean or separately preserve local changes, then retry.
+Do not edit manifests or weaken required_repos to bypass a mismatch. Existing
+remote publication verification still applies. These checks perform only offline
+Git reads with minimal environment, no optional index writes, and no
+fetch/checkout/global config changes. Sibling repositories remain read-only.
+
+Ownership is default-deny before Git runs: the tree, Git directory and config
+must belong to the running user (or BUILTIN\\Administrators under the existing
+Git-equivalent administrator rule) or an explicitly listed `trusted_repo_owners`
+identity. This same owner policy applies to runtime source revision checks.
+Only then is an exact canonical resolved-path per-command `safe.directory` allowed;
+all Git invocations and checkout comparisons use that real path. Values are
+Windows SIDs or qualified `DOMAIN\\account` names (case-insensitive), or decimal
+POSIX UIDs. Unknown/unreadable owners refuse with
+`workspace_repository_untrusted_owner`. `kapa_mcp` is owned by a separate local
+sandbox account, so its owner must be explicitly listed; inspect and approve the
+owners of both the checkout and `.git` (they may be different sandbox accounts).
+Do not add a wildcard or copy identities without operator review. An empty list
+is intentional in the example; populate it in the operator's private config.
+
+Before status, local/worktree config is read with includes disabled; any include
+or includeIf is rejected, not followed. Executable helpers (filter, fsmonitor
+unless false, hooksPath, diff textconv/command, merge driver, gpg,
+alternateRefsCommand and generic `.command`/`.cmd` keys except `credential.*`)
+refuse with `workspace_repository_unsafe_config`.
+Working and indexed `.gitattributes` plus `.git/info/attributes` must not contain
+`filter=`. Submodules are unsupported (default-deny): immediately after owner/config
+gating, a bounded `git ls-files -s -z` rejects any index gitlink (mode 160000) or
+indexed `.gitmodules`; an on-disk `.gitmodules` or Git metadata `modules` directory
+(including the common directory of a linked worktree) also rejects with
+`workspace_repository_submodules_unsupported`, before any attribute walk. No
+submodule child is inspected or launched. This policy covers siblings and runtime
+source alike. System and
+global config/system attributes are disabled, and fsmonitor/hooks are also
+disabled per command. Cleanliness uses `status --porcelain=v1
+--untracked-files=all --ignore-submodules=none` only after inspection. Activation
+and rollback retain the outer `workspace_revision_mismatch` error contract.
+
+Operator-owned `credential.*` settings (including `credential.helper`) and
+network/transport-only settings (`core.sshCommand`, `core.askPass`, and
+`protocol.*`, `uploadpack.*`, `receivepack.*` keys that do not match the denylist
+below) are not rejected merely for being present: the guard runs only local
+read-only commands, never network/authentication operations or fetch.
+In particular, `protocol.allow` and `protocol.<name>.allow` are rejected regardless
+of value (even `never`): the exact protocol predicate is
+`key.startswith("protocol.") and key.endswith(".allow")` on the lowercased key.
+The complete config denylist, using lowercased keys, is:
+
+- Keys starting with `include.`, `includeif.`, `filter.`, or `gpg.`.
+- Exact keys `core.hookspath`, `core.alternaterefscommand`, `core.attributesfile`,
+  `core.excludesfile`, or `extensions.partialclone`.
+- `core.worktree` (no submodule exception).
+- `core.bare` unless its lowercased value is `false`, `no`, `off`, or `0`.
+- Keys starting with `remote.` and ending with `.promisor` unless their
+  lowercased value is `false`, `no`, `off`, or `0`.
+- Keys starting with `protocol.` and ending with `.allow`.
+- Keys ending with `.command` or `.cmd` unless starting with `credential.`.
+- Keys starting with `diff.` and ending with `.textconv`.
+- Keys starting with `merge.` and ending with `.driver`.
+- `core.fsmonitor` unless its lowercased value is `false`, `no`, `off`, or `0`.
+
+These settings refuse with `workspace_repository_unsafe_config`. As additional
+protection, every guard Git invocation clears
+credential helpers with `-c credential.helper=` and sets `GIT_TERMINAL_PROMPT=0`
+and an empty `GIT_ASKPASS`. Runtime never edits input repositories or requires
+operators to remove their authenticated-work configuration. These checks are not
+an OS sandbox: do not run concurrently with an untrusted writer changing
+repository config, attributes or ownership during inspection.
+
+### Ownership boundary and revision-pinning policy (review round 5)
+
+The security boundary is the ownership gate above, including the checkout, Git
+directory and its configuration. Once admitted, the sibling's contents and config
+are **trusted operator inputs**. This guard pins revisions and detects accidental
+drift; it is not a sandbox for a hostile repository or a malicious trusted owner.
+Existing hardening remains, but additional defenses solely against malicious
+trusted owners are outside this policy. Avoid concurrent repository mutation.
+
+Index `assume-unchanged` and `skip-worktree` flags refuse as dirty, even when Git
+status hides their changes. Submodules always refuse, including uninitialized or
+empty gitlinks; remove submodules in a separately reviewed repository change rather
+than weakening this policy. Broken/unreadable sibling links are errors, never optional absence.
+Only actual Git metadata directories contribute config files to the ownership
+boundary; worktree-root files named `config`/`config.worktree` are ordinary inputs.
+All Git calls drain stdout and stderr against one shared 4 MiB byte cap (indexed
+attribute reads may use the metadata cap), kill on overflow, and retain the
+30-second timeout. Each subprocess starts a new process group/session; timeout or
+overflow terminates its process tree (Windows `taskkill /T /F`, POSIX group kill).
+Overflow refuses as `workspace_repository_unsafe_config`. Attribute scans also
+limit aggregate content to 4 MiB across working/index/info attributes and walk
+entries (files/directories) to 100,000; exceeding either refuses with the same code.
+Attribute bodies are checked incrementally, not retained as an unbounded list.
+
+Ignored files remain excluded by Git definition: a revision identifies the Git
+tracked tree, not the complete local filesystem. Local `.env`, generated data and
+other ignored inputs are not attested by `github_revisions`; do not infer their
+reproducibility from these pins. If an operator consumes such files as release
+inputs, record/verify them through a separate explicit input digest contract or
+track them when appropriate (never track secrets). The knowledge `deps.lock`
+comparison reads the working file: if an operator deliberately ignores that lock,
+its values are checked against skills pins but its bytes are not attested by the
+knowledge HEAD. External local `core.attributesFile`/`core.excludesFile` settings
+are rejected because they can change honest-repository cleanliness decisions.
+
 ## 릴리스 구성과 파일 위치
 
 P0 릴리스는 아파트 매매+전월세 **두 서비스**, 하나의 지역·월을 선언한다. 첫 collect는 collecting에 머무르고 두 번째 서비스의 완전한 수집·정규화 후 normalized가 된다. 지역·월 변경은 거부한다. 완료된 같은 서비스 재호출은 기존 출력 해시를 확인한 뒤 collecting 상태로 응답하며 재수집하지 않는다. draft 중단은 guard 재검사 후 collecting으로 재개한다. 두 서비스 출력이 기록된 collecting 또는 collected 중단은 모든 파일 해시·행 수·스키마와 페이지 근거를 확인한 뒤 normalized로 재개하고, 출력 누락/변조는 failed로 전이한다. build는 normalized만 허용하며 그 전 단계는 collect로 복구한다. 범위를 늘리거나 재관측할 때 새 release-id를 사용한다. 실패·부분 릴리스는 build 불가이며 새 ID로 다시 시작한다.
@@ -171,6 +311,16 @@ Windows command는 가상환경의 `Scripts/kapa-runtime-mcp.exe`를 사용한�
 stdout은 MCP 프로토콜 전용이다. 운영자가 네트워크 없는 OS 계정/샌드박스와 data_root 읽기 전용
 권한을 적용할 수 있다. 서버 자체는 자격증명 모듈/HF SDK를 import하지 않고 토큰 환경변수나
 credential 파일을 읽지 않는다. 다운로드·수집·상태 전이·ledger 생성/마이그레이션도 하지 않는다.
+
+The shared manifest contract uses fully qualified GitHub `owner/repo` IDs, never
+aliases such as `runtime`. The runtime builder records `pacappkor/kapa_runtime`
+and the configured `pacappkor/<sibling>` repositories. Every recorded revision is
+a full 40-hex commit SHA; only the five supported workspace sibling repositories
+may record `null` when unavailable. Required-sibling presence and checkout/lock
+compatibility are administrative activation checks, not query-time checks.
+The MCP reader validates the recorded manifest, publication digest and local data;
+it never runs Git, inspects sibling checkouts/`deps.lock`, or requires the query
+machine's workspace configuration to reproduce the publisher's checkout layout.
 
 도구는 정확히 두 개이며 모두 readOnlyHint=true, openWorldHint=false다.
 

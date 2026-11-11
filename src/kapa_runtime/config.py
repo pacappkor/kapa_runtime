@@ -30,6 +30,27 @@ class RuntimeSettings:
     hf_repos: dict[str, str] = field(default_factory=dict)
     hf_visibilities: dict[str, str] = field(default_factory=dict)
     hf_staging_names: dict[str, str] = field(default_factory=dict)
+    sibling_repos: tuple[str, ...] = ("kapa_edu_1", "kapa_edu_2", "kapa_skills", "kapa_knowledge", "kapa_mcp")
+    required_repos: tuple[str, ...] = ("kapa_knowledge", "kapa_skills")
+
+    trusted_repo_owners: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        if (not isinstance(self.trusted_repo_owners, (list, tuple))
+                or any(not isinstance(owner, str) or not owner.strip() or "\x00" in owner
+                       for owner in self.trusted_repo_owners)):
+            raise ConfigurationError("invalid trusted repository owners")
+        object.__setattr__(self, "trusted_repo_owners", tuple(self.trusted_repo_owners))
+        allowed = {"kapa_edu_1", "kapa_edu_2", "kapa_skills", "kapa_knowledge", "kapa_mcp"}
+        for names in (self.sibling_repos, self.required_repos):
+            if (not isinstance(names, (list, tuple))
+                    or any(not isinstance(name, str) or name not in allowed for name in names)
+                    or len(names) != len(set(names))):
+                raise ConfigurationError("invalid workspace repository list")
+        if not set(self.required_repos) <= set(self.sibling_repos):
+            raise ConfigurationError("required repositories must be configured siblings")
+        object.__setattr__(self, "sibling_repos", tuple(self.sibling_repos))
+        object.__setattr__(self, "required_repos", tuple(self.required_repos))
 
     @classmethod
     def load(cls, path: Path | None = None) -> RuntimeSettings:
@@ -98,7 +119,10 @@ class RuntimeSettings:
             if (len(set(configured)) != len(configured) or set(configured).intersection(staged)
                     or len(set(staged)) != len(staged)):
                 raise ValueError()
-            return cls(workspace, data_root, files, namespace, names, visibilities, staging_names)
+            return cls(workspace, data_root, files, namespace, names, visibilities, staging_names,
+                       raw.get("sibling_repos", cls.__dataclass_fields__["sibling_repos"].default),
+                       raw.get("required_repos", cls.__dataclass_fields__["required_repos"].default),
+                       raw.get("trusted_repo_owners", ()))
         except (OSError, ValueError, TypeError, KeyError, AttributeError):
             raise ConfigurationError("unable to load valid runtime configuration") from None
 

@@ -15,7 +15,10 @@ from mcp import Client, StdioServerParameters
 
 from kapa_runtime.config import RuntimeSettings
 from kapa_runtime.mcp.server import create_server
-from kapa_runtime.releases.manifest import build_manifest, dump_manifest, manifest_digest
+from kapa_runtime.releases.manifest import (
+    ManifestError, build_manifest, dump_manifest, manifest_digest, validate_manifest,
+)
+
 from test_parquet import record, write
 
 
@@ -28,7 +31,10 @@ def active(tmp_path):
     files = [{"path": p.relative_to(root).as_posix(), "sha256": hashlib.sha256(p.read_bytes()).hexdigest(),
               "rows": 3} for p in root.rglob("*.parquet")]
     manifest = build_manifest(release_id="synthetic", files=files, parser_version="synthetic/1",
-        state="published", github_revisions={"runtime": "a" * 40},
+        state="published", github_revisions={"pacappkor/kapa_runtime": "a" * 40,
+            "pacappkor/kapa_skills": "c" * 40, "pacappkor/kapa_knowledge": "d" * 40,
+            "pacappkor/kapa_edu_1": None, "pacappkor/kapa_edu_2": None,
+            "pacappkor/kapa_mcp": None},
         hugging_face_revisions=[{"repo_id": "fixture/data", "commit_sha": "b" * 40}],
         coverage={"services": ["molit-apartment-sale"], "months": ["2026-10"]},
         unresolved_gaps=["Historical availability unknown"], quality={"passed": True})
@@ -42,6 +48,40 @@ def active(tmp_path):
              "published_manifest_sha256": manifest_digest(manifest)}}])))
         con.commit()
     return settings
+
+
+@pytest.mark.parametrize("repo,sha", [
+    ("runtime", "a" * 40),
+    ("pacappkor/kapa_runtime", None),
+    ("fixture/unknown", None),
+    ("pacappkor/kapa_skills", "main"),
+])
+def test_active_manifest_rejects_invalid_source_revisions(active, repo, sha):
+    manifest = json.loads(active.active_manifest.read_text(encoding="utf-8"))
+    manifest["github_revisions"][repo] = sha
+    with pytest.raises(ManifestError):
+        validate_manifest(manifest)
+
+
+def test_read_does_not_verify_operator_workspace(active, monkeypatch):
+    from kapa_runtime.releases import workspace
+    from kapa_runtime.storage.active import search_active
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("MCP reads must not inspect operator checkouts")
+
+    for name in ("git", "revision", "capture", "compatibility", "verify"):
+        monkeypatch.setattr(workspace, name, forbidden)
+    # No checkouts exist, despite required siblings having recorded revisions.
+    assert not (active.workspace / "kapa_knowledge").exists()
+    before = {p.relative_to(active.data_root): p.read_bytes()
+              for p in active.data_root.rglob("*") if p.is_file()}
+    manifest, result = search_active(active, {})
+    assert manifest["github_revisions"]["pacappkor/kapa_edu_1"] is None
+    assert result["total"] == 2
+    after = {p.relative_to(active.data_root): p.read_bytes()
+             for p in active.data_root.rglob("*") if p.is_file()}
+    assert before == after
 
 
 def unpack(result):
@@ -104,9 +144,13 @@ def test_stdio_protocol(active, tmp_path):
 
 def test_import_and_calls_never_load_credentials_or_hub(active, tmp_path):
     code = '''import sys
-def no_network(event, args):
-    if event == "socket.connect":
-        raise AssertionError("network access forbidden")
+def no_external_access(event, args):
+    if event in {"socket.connect", "subprocess.Popen", "os.system"}:
+        raise AssertionError("network and subprocess access forbidden")
+    if event == "open":
+        path = str(args[0]).replace(chr(92), "/")
+        if ".git" in path.split("/") or path.endswith("/deps.lock"):
+            raise AssertionError("workspace provenance reads forbidden")
 from pathlib import Path
 from kapa_runtime.config import RuntimeSettings
 from kapa_runtime.mcp.server import create_server
@@ -114,11 +158,14 @@ from mcp import Client
 import asyncio
 # Windows asyncio creates a loopback socketpair while constructing its loop.
 loop = asyncio.new_event_loop()
-sys.addaudithook(no_network)
+sys.addaudithook(no_external_access)
+import json
 async def run():
     async with Client(create_server(RuntimeSettings(Path(sys.argv[1]), Path(sys.argv[2]))), mode="legacy") as c:
-        await c.call_tool("list_data_capabilities", {})
-        await c.call_tool("search_transactions", {})
+        for tool in ("list_data_capabilities", "search_transactions"):
+            result = await c.call_tool(tool, {})
+            assert not result.is_error
+            assert json.loads(result.content[0].text)["status"] == "ok"
 try:
     loop.run_until_complete(run())
 finally:

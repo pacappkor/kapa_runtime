@@ -2,6 +2,7 @@
   "_license": "SPDX-License-Identifier: GPL-3.0-only",
   "workspace": "../..",
   "data_root": "../../_kapa_data",
+  "trusted_repo_owners": [],
   "credential_files": {
     "data_go_kr": "../../data_gov_key.txt",
     "hugging_face_write": "../../hf_write_token.txt",

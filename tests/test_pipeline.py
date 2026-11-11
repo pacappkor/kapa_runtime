@@ -31,7 +31,7 @@ def settings(tmp_path, monkeypatch):
     for name in ("provider.fake", "hub.fake"):
         (tmp_path / name).write_text(KEY, encoding="utf-8")
     config = tmp_path / "runtime.json"
-    config.write_text(json.dumps({"workspace": ".", "data_root": "runtime",
+    config.write_text(json.dumps({"workspace": ".", "data_root": "runtime", "required_repos": [],
         "credential_files": {"data_go_kr": "provider.fake", "hugging_face": "hub.fake"},
         "hf_namespace": "owner", "hf_repos": {"market": "data"}}))
     result = RuntimeSettings.load(config)
@@ -39,7 +39,7 @@ def settings(tmp_path, monkeypatch):
     (result.data_root / "operator-policy.json").write_text(json.dumps({
         "services": {s: {"max_requests": 3, "terms_reviewed": True, "terms_basis": "synthetic fixture permission; reviewed_at=2026-11-10"} for s in p.SERVICES},
         "fixture_evidence": {"github_revision": SHA, "passed": True}}))
-    monkeypatch.setattr(p, "_git_revision", lambda: SHA)
+    monkeypatch.setattr(p, "_git_revision", lambda settings: SHA)
     return result
 
 
@@ -224,13 +224,15 @@ def test_public_terms_rechecked_before_upload(settings):
 
 
 def test_git_revision_refuses_dirty_repo(monkeypatch):
-    from types import SimpleNamespace
-    def git(command, **kwargs):
-        assert "-C" in command
-        return SimpleNamespace(stdout="?? local-change\n")
-    monkeypatch.setattr(p.subprocess, "run", git)
+    def git(repo, *args, **kwargs):
+        assert "--ignore-submodules=none" in args
+        assert kwargs["trusted_repo_owners"] == ("trusted",)
+        assert args[0] == "status"
+        return "?? local-change\n"
+    monkeypatch.setattr(p.workspace_guard, "git", git)
     with pytest.raises(p.PipelineError, match="source_repository_dirty"):
-        p._git_revision()
+        from types import SimpleNamespace
+        p._git_revision(SimpleNamespace(trusted_repo_owners=("trusted",)))
 
 
 def test_daily_quota_reservations_are_per_service(settings):

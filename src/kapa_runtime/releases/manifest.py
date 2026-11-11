@@ -94,7 +94,17 @@ def validate_manifest(manifest: dict) -> dict:
     if not isinstance(m["github_revisions"], dict) or not isinstance(m["hugging_face_revisions"], list):
         raise ManifestError("Invalid revision collections")
     fixed = state in (ReleaseState.PUBLISHED, ReleaseState.ACTIVE)
-    revisions = list(m["github_revisions"].values())
+    # Optional workspace checkouts may be explicitly unavailable (null), even
+    # after publication. HF revisions must still always be pinned when fixed.
+    revisions = []
+    for repo, sha in m["github_revisions"].items():
+        if not isinstance(repo, str) or not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
+            raise ManifestError("Invalid GitHub repository ID")
+        if sha is not None and not (isinstance(sha, str) and SHA.fullmatch(sha)):
+            raise ManifestError("Revisions must be full 40-hex commit SHAs")
+        if sha is None and repo not in {"pacappkor/" + name for name in
+                ("kapa_edu_1", "kapa_edu_2", "kapa_skills", "kapa_knowledge", "kapa_mcp")}:
+            raise ManifestError("Only workspace siblings may be unavailable")
     repos = []
     for ref in m["hugging_face_revisions"]:
         if not isinstance(ref, dict) or set(ref) != {"repo_id", "commit_sha"}:
@@ -112,7 +122,7 @@ def validate_manifest(manifest: dict) -> dict:
             raise ManifestError("Invalid staging revision")
     if len(set(repos)) != len(repos):
         raise ManifestError("Duplicate HF repository")
-    if fixed and (not repos or not m["github_revisions"]):
+    if fixed and (not repos or not any(m["github_revisions"].values())):
         raise ManifestError("Published releases require source and dataset revisions")
     if any(not (isinstance(v, str) and SHA.fullmatch(v)) for v in revisions if fixed or v is not None):
         raise ManifestError("Revisions must be full 40-hex commit SHAs")

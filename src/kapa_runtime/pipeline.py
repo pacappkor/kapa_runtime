@@ -17,7 +17,6 @@ from types import SimpleNamespace
 from pathlib import Path
 import re
 import shutil
-import subprocess
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -32,6 +31,7 @@ from .normalization.rtms import normalize
 from .registry import ServiceRegistry
 from .releases.activate import activate as replace_active, rollback as restore_previous
 from .releases.hf import _HubWriter, download_bytes
+from .releases import workspace as workspace_guard
 from .releases.manifest import build_manifest, dump_manifest, load_manifest as _decode_manifest, relative_path, manifest_digest
 from .storage.parquet import SCHEMA, schema_for, _safe_path, read_partition, write_partition
 from .storage.metadata import read_json, read_metadata
@@ -355,18 +355,27 @@ def collect(settings, *, service, lawd_code, deal_ymd, release_id=None, client=N
             raise PipelineError("collection_or_normalization_failed") from None
 
 
-def _git_revision():
-    repo = Path(__file__).resolve().parents[2]
+def _git_revision(settings):
+    # Keep the lexical checkout until the guard rejects reparse points.
+    repo = Path(__file__).absolute().parents[2]
     def git(*args):
-        return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
-                              text=True, timeout=15).stdout.strip()
+        return workspace_guard.git(repo, *args, trusted_repo_owners=settings.trusted_repo_owners)
     try:
-        _require(not git("status", "--porcelain", "--untracked-files=all"), "source_repository_dirty")
+        _require(not git("status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"), "source_repository_dirty")
         sha = git("rev-parse", "HEAD")
         _require(re.fullmatch(r"[0-9a-f]{40}", sha), "invalid_source_revision")
         return sha
-    except (OSError, subprocess.SubprocessError):
+    except workspace_guard.WorkspaceError as exc:
+        if str(exc) == "workspace_repository_submodules_unsupported":
+            raise PipelineError(str(exc)) from None
         raise PipelineError("source_revision_unavailable") from None
+
+
+def _verify_workspace(settings, manifest):
+    try:
+        workspace_guard.verify(settings, manifest)
+    except workspace_guard.WorkspaceError:
+        raise PipelineError("workspace_revision_mismatch") from None
 
 
 def _verify_local(root, manifest):
@@ -446,7 +455,11 @@ def build(settings, *, release_id):
         _require(row is not None and row["state"] == "normalized",
                  "build_requires_normalized_release_run_collect_to_recover")
         meta = read_json(_metadata(settings, release_id))
-        sha = _git_revision()
+        sha = _git_revision(settings)
+        try:
+            siblings, workspace_warnings = workspace_guard.capture(settings)
+        except workspace_guard.WorkspaceError as exc:
+            raise PipelineError(str(exc)) from None
         policy = _policy(settings)
         terms_evidence = {s: policy.get("services", {}).get(s, {}) for s in SERVICES}
         terms = all(p.get("terms_reviewed") is True and isinstance(p.get("terms_basis"), str)
@@ -458,10 +471,10 @@ def build(settings, *, release_id):
         files = sorted(_verify_complete(root, meta), key=lambda f: f["path"])
         m = build_manifest(release_id=release_id, state="validated", files=files,
             parser_version=molit_rtms.PARSER_VERSION, source_runs=[c["run_id"] for c in meta["completed"].values()],
-            github_revisions={"pacappkor/kapa_runtime": sha},
+            github_revisions={"pacappkor/kapa_runtime": sha, **siblings},
             coverage={"services": list(SERVICES), "lawd_code": meta["lawd_code"], "deal_ymd": meta["deal_ymd"], "complete": True},
             quality={"passed": True, "legal_verified": False, "fixture_revision": sha,
-                     "terms_evidence": terms_evidence})
+                     "terms_evidence": terms_evidence, "workspace_warnings": workspace_warnings})
         registry = ServiceRegistry.load()
         m['normalized_extra_fields'] = {
             service: sorted(registry.get(service).normalized_extra_fields) for service in SERVICES}
@@ -497,7 +510,8 @@ def build(settings, *, release_id):
             "fixture_revision": sha,
             "validated_manifest_sha256": manifest_digest(m),
             "validated_files": m["files"]})
-        return {"release_id": release_id, "state": "validated", "files": len(m["files"])}
+        return {"release_id": release_id, "state": "validated", "files": len(m["files"]),
+                "warnings": workspace_warnings}
 
 
 def _read_manifest(path):
@@ -1002,6 +1016,7 @@ def activate(settings, *, release_id, api=None):
         _require(row is not None and row['state'] in ('published', 'active'), 'activation_state_mismatch')
         path = _manifest_path(settings, release_id)
         m = _trusted_published_manifest(settings, store, release_id)
+        _verify_workspace(settings, m)
         if settings.active_manifest.exists():
             pointer = _read_manifest(settings.active_manifest)
             _trusted_published_manifest(settings, store, pointer["release_id"], path=settings.active_manifest)
@@ -1012,6 +1027,7 @@ def activate(settings, *, release_id, api=None):
                                   previous_files=_previous_repo_files(settings, store, publisher.repo_id,
                                                                       as_of=release_id), evidence_store=store)
         _require_target_served_at_head(settings, store, publisher, m)
+        _verify_workspace(settings, m)
         replace_active(path, settings.active_manifest, report)
         if row['state'] == 'published':
             store.transition_release(release_id, "active", {
@@ -1027,6 +1043,7 @@ def rollback(settings, *, api=None):
         pointer = _read_manifest(previous_path)
         previous = _trusted_published_manifest(settings, store, pointer["release_id"], path=previous_path)
         _id(previous["release_id"])
+        _verify_workspace(settings, previous)
         _verify_local(settings.snapshots_dir / previous["release_id"], previous)
         row = store.get_release(previous["release_id"])
         _require(row is not None and row["state"] in ("published", "active"), "rollback_state_mismatch")
@@ -1038,6 +1055,7 @@ def rollback(settings, *, api=None):
                                                                       as_of=previous['release_id']), evidence_store=store)
         _require(report.passed, "rollback_remote_verification_failed")
         _require_target_served_at_head(settings, store, publisher, previous)
+        _verify_workspace(settings, previous)
         restore_previous(settings.active_manifest, report)
         if row["state"] == "published":
             store.transition_release(previous["release_id"], "active", {
