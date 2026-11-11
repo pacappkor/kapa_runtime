@@ -14,5 +14,6 @@
 | 0007 | [장부 결속 릴리스 신뢰와 경로 소유권](0007-publication-trust.md) |
 | 0008 | [단일 신뢰 운영자 로컬 PC 위협 모델](0008-single-operator-threat-model.md) |
 | 0009 | [Workspace revision 고정과 활성화 guard](0009-workspace-revision-guard.md) |
+| 0010 | [누적 batch release와 manifest shard 계약 (2026-11-12, 운영 통합 전)](0010-cumulative-batch-releases.md) |
 
 근거는 저장소 코드·RUNBOOK·AGENTS·Git 이력과 2026-11-10 세션/구조 검토 및 PR #1 검토 기록, 2026-11-11 사용자 결정에 한정한다. 외부 오케스트레이터 기록은 출처 이름만 남기고 필요한 결론을 각 ADR에 담았으므로 읽기 위해 별도 workspace가 필요하지 않다. 대안과 재검토 조건은 현재 결정을 설명하는 기록이며 미래 기능의 구현 약속이 아니다.

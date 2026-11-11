@@ -353,3 +353,25 @@ error의 data.error_code는 invalid_query/active_snapshot_unverified/query_faile
 검증은 `uv run --locked --extra test --extra mcp python -I -B -m pytest -p no:cacheprovider -q`로
 실행한다. 공식 SDK in-memory/stdio initialize·list·call 테스트이며 실제 채팅 제품 등록/인수나
 실제 HF/API 연결 성공을 의미하지 않는다.
+
+## 누적 릴리스(설계 단계)
+
+**아직 운영 불가(not yet operational).** [ADR-0010](adr/0010-cumulative-batch-releases.md)의
+manifest v2와 shard, 순수 assembly 함수만 제공한다. 기존 CLI/build/publish/activate와
+v1 pipeline은 바뀌지 않았다. 예제 root/shard를 ACTIVE에 복사하거나 기존 publish에
+넣지 않는다. 이 계약 추가는 수집·게시 실행 승인이 아니다.
+
+`examples/cumulative-root.example.json`과 그 `coverage_shards`에 명시된 JSON은
+합성 fixture이며 실제 거래나 게시 근거가 아니다. `validate_manifest`는 root를,
+`resolve_snapshot_inventory(manifest, loader)`는 명시된 hash-bound shard까지 검증한다.
+loader는 고정 revision과 안전한 bounded metadata read를 책임진다. glob 금지,
+16 MiB/metadata file, 1,024 shards, 4,096 entries/shard, 250,000 entries/snapshot
+상한은 ADR의 counting 규칙을 따른다. coverage는 정확한 K 집합이지 곱집합이 아니다.
+zero는 수집 완료이며 미수집 gap과 구분한다. 현재 선택만 조회하고 archive는 기본 조회에서 제외한다.
+
+후속 rollout은 서울 우선·최신 월 우선·두 서비스 공통 기간의 완전 pair만 대상으로 한다.
+서비스당 9,000 requests/day, batch 60 pairs / 변경 512 MiB 이내로 제한할 계획이다.
+수동 smoke 성공 후에만 일일 자동 publish+activate를 도입하고 오류 시 중지한다.
+현재 quota/CLI가 이 신규 정책을 구현했다고 해석하지 않는다. parent 재확인,
+origin 검증, tombstone-after-union, write-once 경로, atomic activation 및
+published-but-not-active 차단을 통합·검증하기 전에는 누적 운영을 시작하지 않는다.

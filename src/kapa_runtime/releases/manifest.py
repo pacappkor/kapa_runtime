@@ -55,6 +55,11 @@ def validate_manifest(manifest: dict) -> dict:
     m = json.loads(_json(manifest), object_pairs_hook=_pairs, parse_constant=_constant)
     if not isinstance(m, dict):
         raise ManifestError("Manifest must be an object")
+    if m.get("schema_version") not in ("kapa-runtime-release/1", "kapa-runtime-release/2"):
+        raise ManifestError("Unknown manifest version")
+    if m["schema_version"] == "kapa-runtime-release/2":
+        from .manifest_v2 import validate_root
+        validate_root(m)
     required = {"release_id", "state", "created_at", "source_runs", "github_revisions",
                 "hugging_face_revisions", "schema_version", "parser_version", "data_schema_version",
                 "files", "coverage", "quality", "unresolved_gaps"}
@@ -169,6 +174,9 @@ def loads_manifest(text: str) -> dict:
         m = json.loads(text, object_pairs_hook=_pairs, parse_constant=_constant)
     except (ValueError, TypeError) as exc:
         raise ManifestError("Invalid strict JSON manifest") from exc
+    if (isinstance(m, dict) and m.get("schema_version") == "kapa-runtime-release/2"
+            and len(text.encode("utf-8")) > 16 * 1024 * 1024):
+        raise ManifestError("Metadata limit exceeded")
     return validate_manifest(m)
 
 
@@ -184,3 +192,9 @@ def dump_manifest(manifest: dict, path: Path) -> None:
 
 def manifest_digest(manifest: dict) -> str:
     return hashlib.sha256(dumps_manifest(manifest).encode("utf-8")).hexdigest()
+
+
+def resolve_snapshot_inventory(manifest, loader):
+    """Resolve v2 current files plus metadata; preserve the v1 file list."""
+    from .manifest_v2 import resolve_snapshot_inventory as resolve
+    return resolve(manifest, loader)
