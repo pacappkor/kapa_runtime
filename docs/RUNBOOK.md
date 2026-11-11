@@ -118,3 +118,66 @@ kapa-runtime attest-legacy --config runtime.config.json --release-id release-111
 ```
 
 This is a remote-read operation, not a publication or a local-manifest adoption. It requires one full repo/commit revision already recorded in that release's uploaded-candidate/published ledger evidence, the configured target identity/visibility, explicit credentials and current secret scans. Every listed file and uploaded `manifests/release.json` is downloaded at that exact SHA and checked for hashes, rows and the manifest's known frozen schema. The uploaded candidate cannot contain its own hash or commit SHA: the command deterministically derives the final published manifest by adding only that downloaded candidate hash, ledger revision, published state and ledger staging provenance, then requires canonical equality with the local final manifest. It never edits a mismatching local manifest. Only after all checks pass does it persist the published digest with `legacy_attestation` evidence containing method `legacy-remote-attestation`, commit_sha and attested_at. Missing ledger revision, changed local/remote manifest, payload mismatch or scan failure leaves the publication untrusted. Candidate-supplied staging provenance is discarded; only a strictly shaped ledger staging revision can be added back. The normal public release allowlist also applies to every attested file, so raw envelopes cannot become retained publication ownership. All pinned Hub downloads (verification, repair, promotion and attestation) share a bounded 256 MiB byte reader: standard snapshot-to-blob cache symlinks and plain files are supported, but the resolved target must be a regular file strictly inside the configured cache directory. Local data_root metadata keeps the separate no-link 16 MiB boundary. Nonpublished validated/uploaded-candidate queries must match the ledger's validated canonical manifest digest and full file inventory before selecting a schema version or replaying raw evidence. Back up the ledger before operator maintenance; do not manually insert a digest from mutable local files.
+
+## 로컬 조회 MCP (stdio)
+
+조회 프로세스는 운영 수집 CLI와 분리한다. `uv sync --locked --extra mcp`로 설치한다.
+자격증명 없이 아래와 같은 전용 설정을 만들고 `KAPA_RUNTIME_CONFIG`로 명시한다.
+상대 경로는 설정 파일 디렉터리 기준이며 data_root는 운영자가 이미 활성화한 로컬 자료를 가리킨다.
+
+```json
+{"workspace": ".", "data_root": "../_kapa_data"}
+```
+
+```sh
+KAPA_RUNTIME_CONFIG=/absolute/path/query.config.json kapa-runtime-mcp
+```
+
+Windows에서는 실행할 프로세스의 환경변수에 같은 이름을 설정한다. 클라이언트 등록용
+예시 (사용자가 경로를 교체하여 수동 등록; 이 구현은 실제 클라이언트 설정을 변경하지 않는다)
+
+```json
+{
+  "mcpServers": {
+    "kapa-runtime-data": {
+      "command": "/absolute/path/venv/bin/kapa-runtime-mcp",
+      "args": [],
+      "env": {"KAPA_RUNTIME_CONFIG": "/absolute/path/query.config.json"}
+    }
+  }
+}
+```
+
+Windows command는 가상환경의 `Scripts/kapa-runtime-mcp.exe`를 사용한다. Codex 등 다른
+클라이언트도 동일 command/args/env의 stdio 서버로 등록한다. HTTP transport나 외부 endpoint는 없다.
+stdout은 MCP 프로토콜 전용이다. 운영자가 네트워크 없는 OS 계정/샌드박스와 data_root 읽기 전용
+권한을 적용할 수 있다. 서버 자체는 자격증명 모듈/HF SDK를 import하지 않고 토큰 환경변수나
+credential 파일을 읽지 않는다. 다운로드·수집·상태 전이·ledger 생성/마이그레이션도 하지 않는다.
+
+도구는 정확히 두 개이며 모두 readOnlyHint=true, openWorldHint=false다.
+
+- `list_data_capabilities(service_id=null)`: packaged registry의 서비스, 승인·operation 검증 상태,
+  필수 인자·패턴·page_size_max와 사용자 보고 quota를 반환한다. 실시간 승인/잔여량 점검이 아니다.
+  현재 snapshot coverage나 미구현 서비스의 수집 가능성을 보증하지 않는다.
+- `search_transactions(filters={}, limit=100, cursor=null)`: active.json의 published digest와
+  read-only SQLite publication evidence를 대조하고 로컬 snapshot 전체 해시·schema·행 수를
+  확인한다. staging/release_id/latest 경로는 제공하지 않는다. 허용 필터는 asset_type,
+  transaction_type, lawd_code, contract_date_from/to(ISO 날짜), price_krw_min/max(정수 KRW),
+  area_m2_min/max(정확한 decimal 문자열 또는 정수), building_name_contains, include_cancelled(boolean).
+  limit은 1..1000이다. 취소는 기본 제외하며 data.excluded에 사유/건수를 보존한다.
+  next_cursor는 snapshot 및 필터 digest에 결속한다. ACTIVE 교체 후 다른 snapshot의 cursor는
+  거부하므로 처음부터 다시 조회한다. 면적 Decimal은 정확도를 위해 JSON 문자열로 반환한다.
+
+공통 envelope는 schema_version/request_id/status/data/provenance/snapshot_refs/coverage/warnings/
+unresolved_gaps/next_cursor/observed_at/legal_verified=false를 포함한다. provenance에는 release_id,
+canonical manifest_sha256, HF repo_id+commit_sha가 있고 coverage는 release/query를 구별한다.
+observed_at은 이 응답을 만든 시각이지 공급자 공표시각이 아니다. status는 ok, no_data(검증된
+조회 0건 또는 registry 필터 일치 없음), no_active_release(포인터 없음), error를 구별한다.
+error의 data.error_code는 invalid_query/active_snapshot_unverified/query_failed이며 내부 예외나
+경로를 반환하지 않는다. 손상·미검증 snapshot을 정상 0건으로 바꾸지 않는다. 이 MCP는 로컬
+해시 일치만 확인하며 현재 HF head 상태나 법적 적용을 검증하지 않는다. 반환 행 수는 제한되지만
+검증은 snapshot 전체를 읽으므로 대용량 snapshot에서는 비용을 고려한다.
+
+검증은 `uv run --locked --extra test --extra mcp python -I -B -m pytest -p no:cacheprovider -q`로
+실행한다. 공식 SDK in-memory/stdio initialize·list·call 테스트이며 실제 채팅 제품 등록/인수나
+실제 HF/API 연결 성공을 의미하지 않는다.

@@ -6,7 +6,10 @@ import os
 import tempfile
 from pathlib import Path
 
-from .hf import VerificationReport
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .hf import VerificationReport
 from .manifest import dumps_manifest, load_manifest, manifest_digest
 
 
@@ -33,6 +36,8 @@ def activate(manifest_path: Path, active_path: Path, verified: VerificationRepor
     and its published state so the report remains bound to the active content.
     Callers serialize writers (as for the runtime state database).
     """
+    from .hf import VerificationReport
+
     manifest = load_manifest(manifest_path)
     refs = {(r["repo_id"], r["commit_sha"]) for r in manifest["hugging_face_revisions"]}
     paths = {f["path"] for f in manifest["files"]}
@@ -59,6 +64,8 @@ def activate(manifest_path: Path, active_path: Path, verified: VerificationRepor
 
 def rollback(active_path: Path, verified: VerificationReport) -> None:
     """Restore the prior reference; retain previous.json and every data file."""
+    from .hf import VerificationReport
+
     active_path = Path(active_path)
     previous = active_path.with_name("previous.json")
     if active_path == previous:

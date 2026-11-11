@@ -23,9 +23,11 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=8,<10"]
+mcp = ["mcp==2.3.0"]
 
 [project.scripts]
 kapa-runtime = "kapa_runtime.cli:main"
+kapa-runtime-mcp = "kapa_runtime.mcp.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

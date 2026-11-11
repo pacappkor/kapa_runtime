@@ -1079,15 +1079,12 @@ def query(settings, *, filters, limit=100, release_id=None, cursor=None):
         verification = {"complete": True, "hashes_verified": True, "rows_verified": True,
                         "services": list(meta["services"]), "files_checked": len(files)}
     else:
-        pointer = _read_manifest(settings.active_manifest)
-        with StateStore(settings.state_db) as store:
-            m = _trusted_published_manifest(settings, store, pointer["release_id"], path=settings.active_manifest)
-        root = settings.snapshots_dir / _id(m["release_id"])
-        _verify_local(root, m)
-        data_schema_version = m["data_schema_version"]
-        release_state = "active"
-        verification = {"complete": True, "hashes_verified": True, "rows_verified": True,
-                        "files_checked": len(m["files"])}
+        from .storage.active import ActiveSnapshotError, search_active
+        try:
+            _, result = search_active(settings, filters, limit=limit, cursor=cursor)
+        except ActiveSnapshotError as exc:
+            raise PipelineError(str(exc)) from None
+        return result
     result = TransactionQuery(root, data_schema_version=data_schema_version).search(filters, limit=limit, cursor=cursor)
     result.update(release_state=release_state, verification=verification)
     return result
