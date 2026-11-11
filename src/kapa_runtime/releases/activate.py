@@ -29,7 +29,13 @@ def _atomic_write(path: Path, payload: bytes) -> None:
         Path(name).unlink(missing_ok=True)
 
 
-def activate(manifest_path: Path, active_path: Path, verified: VerificationReport) -> None:
+def _selected_paths(manifest, root):
+    from .snapshot import inventory
+    return {f['path'] for f in inventory(manifest, root)} | {
+        r['path'] for r in manifest.get('coverage_shards', [])}
+
+
+def activate(manifest_path: Path, active_path: Path, verified: VerificationReport, *, snapshot_root=None) -> None:
     """Activate the exact verified published manifest, not a mutable candidate.
 
     The pointer filename denotes activation; preserve the verified manifest bytes
@@ -40,7 +46,7 @@ def activate(manifest_path: Path, active_path: Path, verified: VerificationRepor
 
     manifest = load_manifest(manifest_path)
     refs = {(r["repo_id"], r["commit_sha"]) for r in manifest["hugging_face_revisions"]}
-    paths = {f["path"] for f in manifest["files"]}
+    paths = _selected_paths(manifest, snapshot_root or Path(manifest_path).parent.parent)
     if (not isinstance(verified, VerificationReport) or not verified.passed
             or manifest["state"] != "published"
             or verified.manifest_sha256 != manifest_digest(manifest)
@@ -62,7 +68,7 @@ def activate(manifest_path: Path, active_path: Path, verified: VerificationRepor
     _atomic_write(active_path, dumps_manifest(manifest).encode("utf-8"))
 
 
-def rollback(active_path: Path, verified: VerificationReport) -> None:
+def rollback(active_path: Path, verified: VerificationReport, *, snapshot_root=None) -> None:
     """Restore the prior reference; retain previous.json and every data file."""
     from .hf import VerificationReport
 
@@ -75,6 +81,6 @@ def rollback(active_path: Path, verified: VerificationReport) -> None:
             or not isinstance(verified, VerificationReport) or not verified.passed
             or verified.manifest_sha256 != manifest_digest(old)
             or set(verified.revisions) != {(r["repo_id"], r["commit_sha"]) for r in old["hugging_face_revisions"]}
-            or set(verified.checked_files) != {f["path"] for f in old["files"]}):
+            or set(verified.checked_files) != _selected_paths(old, snapshot_root or previous.parent)):
         raise ActivationError("Complete verification of the previous release is required")
     _atomic_write(active_path, dumps_manifest(old).encode("utf-8"))

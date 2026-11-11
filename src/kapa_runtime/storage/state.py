@@ -110,7 +110,7 @@ class StateStore:
     def _migrate(self):
         con = self._connection
         version = con.execute("PRAGMA user_version").fetchone()[0]
-        if version > 2:
+        if version > 3:
             raise ValueError("unsupported state schema version")
         if version == 0:
             con.executescript("""
@@ -134,6 +134,48 @@ class StateStore:
                 PRAGMA user_version=2;
                 COMMIT;
             """)
+
+    def _migrate_snapshots(self):
+        """Opt-in v3 migration; unchanged v1 callers keep their v2 ledger."""
+        con = self._connection
+        if con.execute('PRAGMA user_version').fetchone()[0] == 2:
+            con.executescript("""
+                BEGIN IMMEDIATE;
+                CREATE TABLE snapshot_parents (release_id TEXT PRIMARY KEY,
+                    parent_release_id TEXT NOT NULL, parent_digest TEXT NOT NULL);
+                CREATE TABLE batch_members (release_id TEXT NOT NULL,
+                    lawd_code TEXT NOT NULL, deal_ymd TEXT NOT NULL,
+                    PRIMARY KEY (release_id, lawd_code, deal_ymd));
+                CREATE TABLE partition_selections (release_id TEXT NOT NULL,
+                    service_id TEXT NOT NULL, lawd_code TEXT NOT NULL,
+                    deal_ymd TEXT NOT NULL, evidence TEXT NOT NULL,
+                    PRIMARY KEY (release_id, service_id, lawd_code, deal_ymd));
+                PRAGMA user_version=3;
+                COMMIT;
+            """)
+
+    def record_snapshot(self, manifest):
+        from ..releases.manifest import validate_manifest
+        m = validate_manifest(manifest)
+        if m['schema_version'] != 'kapa-runtime-release/2' or m['coverage_shards']:
+            raise ValueError('resolved inline snapshot required')
+        self._migrate_snapshots()
+        con = self._connection
+        con.execute('BEGIN IMMEDIATE')
+        try:
+            parent = m['parent_snapshot']
+            con.execute('INSERT INTO snapshot_parents VALUES (?,?,?)',
+                        (m['release_id'], parent['release_id'], parent['digest']))
+            for p in m['batch_scope']['declared_pairs']:
+                con.execute('INSERT INTO batch_members VALUES (?,?,?)',
+                            (m['release_id'], p['lawd_code'], p['deal_ymd']))
+            for p in m['selected_partitions']:
+                con.execute('INSERT INTO partition_selections VALUES (?,?,?,?,?)',
+                            (m['release_id'], p['service_id'], p['lawd_code'], p['deal_ymd'], _dump(p)))
+            con.execute('COMMIT')
+        except BaseException:
+            con.execute('ROLLBACK')
+            raise
 
     def repository_evidence(self, repo_id):
         row = self._connection.execute("SELECT data FROM repository_evidence WHERE repo_id=?", (repo_id,)).fetchone()
