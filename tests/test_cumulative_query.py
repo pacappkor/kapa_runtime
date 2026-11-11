@@ -102,6 +102,9 @@ def test_shard_digest_and_bounded_batches(tmp_path, monkeypatch):
             sizes.append(batch.num_rows)
             yield batch
     monkeypatch.setattr(pq.ParquetFile, 'iter_batches', observed)
+    def unbounded(*args, **kwargs):
+        pytest.fail('integrity scans must not materialize a whole Parquet file')
+    monkeypatch.setattr(pq.ParquetFile, 'read', unbounded)
     result = TransactionQuery(tmp_path, manifest=manifest).search({}, limit=1)
     assert result['total'] == BATCH_SIZE * 4
     assert sizes and max(sizes) <= BATCH_SIZE

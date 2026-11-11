@@ -15,7 +15,7 @@ from ..releases.manifest_v2 import COVERAGE, KEY, resolve_snapshot
 
 DEFAULT_METADATA_BUDGET = 256 * 1024 * 1024
 from .metadata import read_metadata
-from .parquet import _safe_path, schema_for
+from .parquet import _safe_path, schema_for, decode_records
 
 BATCH_SIZE = 4096
 PROVENANCE_LIMIT = 100
@@ -53,16 +53,17 @@ def _verify_files(root, entries, version, partitions):
             raise ValueError('schema_mismatch')
         count = 0
         owner = owners.get(entry['path'])
-        columns = ['asset_type', 'transaction_type', 'lawd_code', 'contract_date', 'observation_id']
         for batch in parquet.iter_batches(batch_size=BATCH_SIZE, use_threads=False):
             count += batch.num_rows
-            if owner is not None:
-                for row in batch.select(columns).to_pylist():
-                    month = row['contract_date']
-                    if (row['asset_type'] != 'apartment' or
-                            row['transaction_type'] != owner['service_id'].removeprefix('molit-apartment-') or
-                            row['lawd_code'] != owner['lawd_code'] or
-                            row['observation_id'] != owner['observation_id'] or
+            # Match read_partition validation for both historical and current
+            # schemas, without retaining records beyond this bounded batch.
+            for record in decode_records(batch):
+                if owner is not None:
+                    month = record.contract_date
+                    if (record.asset_type != 'apartment' or
+                            record.transaction_type != owner['service_id'].removeprefix('molit-apartment-') or
+                            record.lawd_code != owner['lawd_code'] or
+                            record.observation_id != owner['observation_id'] or
                             (month is not None and month.strftime('%Y%m') != owner['deal_ymd'])):
                         raise ValueError('partition_metadata_mismatch')
         if count != entry['rows']:

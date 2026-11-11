@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import base64
-from datetime import date, timezone
+from datetime import date
 from decimal import Decimal
 import hashlib
 import json
@@ -16,7 +16,7 @@ import pyarrow.dataset as ds
 from .snapshot_query import (BATCH_SIZE, PROVENANCE_LIMIT, DEFAULT_METADATA_BUDGET,
                              SnapshotIntegrityError, SnapshotInventory)
 
-from .parquet import SCHEMA, schema_for, _TIME_FIELDS, _row, _safe_path, read_partition
+from .parquet import SCHEMA, schema_for, _TIME_FIELDS, _row, _safe_path, read_partition, decode_record
 
 _SELECT = ", ".join(f"CAST({field.name} AS TIMESTAMP) AS {field.name}" if field.name in _TIME_FIELDS else field.name for field in SCHEMA)
 
@@ -78,7 +78,10 @@ class TransactionQuery:
         rows = []
         for path in sorted(files):
             digest.update(_json([path.relative_to(self.root).as_posix(), hashlib.sha256(path.read_bytes()).hexdigest()]))
-            rows.extend(_row(record) for record in read_partition(path, schema_version=self.data_schema_version))
+            try:
+                rows.extend(_row(record) for record in read_partition(path, schema_version=self.data_schema_version))
+            except Exception as exc:
+                raise SnapshotIntegrityError('snapshot_row_unverified') from exc
         current = digest.hexdigest()
         if self._snapshot_digest is not None and self._snapshot_digest != current:
             raise ValueError("snapshot changed; create a new reader")
@@ -210,9 +213,13 @@ class TransactionQuery:
             names = [column[0] for column in result.description]
             rows = [dict(zip(names, values)) for values in result.fetchall()]
         for row in rows:
-            for name in _TIME_FIELDS:
-                row[name] = row[name].replace(tzinfo=timezone.utc)
-            row["extra"] = json.loads(row["extra"])
+            try:
+                record = decode_record({k: v for k, v in row.items() if k != '_source_file'})
+                for name in _TIME_FIELDS:
+                    row[name] = getattr(record, name)
+                row["extra"] = record.extra
+            except Exception as exc:
+                raise SnapshotIntegrityError('snapshot_row_unverified') from exc
         if self.inventory is not None:
             self.inventory.verify(selected_files)
             coverage = {
