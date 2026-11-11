@@ -104,3 +104,31 @@ def test_redact_all_forms():
     assert redact(text, [Secret(value)]) == "*** | *** | *** | ***"
     assert redact("unchanged", [Secret("")]) == "unchanged"
     assert redact("TESTKEY-long TESTKEY", [Secret("TESTKEY"), Secret("TESTKEY-long")]) == "*** ***"
+
+
+@pytest.mark.parametrize("role,variable", [("hugging_face_write", "HF_TOKEN_WRITE"),
+                                           ("hugging_face_read", "HF_TOKEN_READ")])
+def test_hf_roles_legacy_fallback_and_explicit_precedence(settings, role, variable):
+    legacy = {"HF_TOKEN": "TESTKEY-legacy"}
+    assert load_secret(role, settings, legacy).reveal() == "TESTKEY-legacy"
+    assert diagnose(role, settings, legacy)["warning"] == "legacy_" + role.replace("hugging_face_", "hugging_face_used_for_")
+    env = {**legacy, variable: "TESTKEY-role"}
+    assert load_secret(role, settings, env).reveal() == "TESTKEY-role"
+    assert "warning" not in diagnose(role, settings, env)
+    with pytest.raises(CredentialError):
+        load_secret(role, settings, {**legacy, variable: ""})
+    settings.credential_files[role] = settings.workspace / "role.fake"
+    settings.credential_files[role].write_text("TESTKEY-file-role")
+    assert load_secret(role, settings, legacy).reveal() == "TESTKEY-file-role"
+    assert diagnose(role, settings, legacy)["source"] == "file"
+
+
+def test_write_role_never_supplies_read_default(settings):
+    with pytest.raises(CredentialError, match="not_configured"):
+        load_secret("hugging_face_read", settings, {"HF_TOKEN_WRITE": "TESTKEY-write"})
+
+
+def test_configured_missing_read_never_falls_back(settings):
+    settings.credential_files["hugging_face_read"] = settings.workspace / "missing.fake"
+    with pytest.raises(CredentialError, match="missing_file"):
+        load_secret("hugging_face_read", settings, {"HF_TOKEN": "TESTKEY-legacy"})

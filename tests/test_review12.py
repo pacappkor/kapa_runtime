@@ -4,6 +4,9 @@ import hashlib
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+
+
+pytestmark = pytest.mark.slow
 from publication_fixture import seal_publication
 
 from kapa_runtime import pipeline as p

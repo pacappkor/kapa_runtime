@@ -37,3 +37,4 @@ kapa_runtime = ["registry/*.json", "schemas/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["slow: heavy pipeline, promotion, attestation and review integration tests"]

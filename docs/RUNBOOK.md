@@ -13,7 +13,8 @@ Python 3.12와 `uv sync --locked --extra test`가 필요하다. 실제 호출은
   "data_root": ".",
   "credential_files": {
     "data_go_kr": "../data_gov_key.txt",
-    "hugging_face": "../hf_token.txt"
+    "hugging_face_write": "../hf_write_token.txt",
+    "hugging_face_read": "../hf_read_token.txt"
   },
   "hf_namespace": "YOUR_PRIVATE_NAMESPACE",
   "hf_repos": {"market": {"name": "kapa-market", "visibility": "private"}}
@@ -118,6 +119,23 @@ kapa-runtime attest-legacy --config runtime.config.json --release-id release-111
 ```
 
 This is a remote-read operation, not a publication or a local-manifest adoption. It requires one full repo/commit revision already recorded in that release's uploaded-candidate/published ledger evidence, the configured target identity/visibility, explicit credentials and current secret scans. Every listed file and uploaded `manifests/release.json` is downloaded at that exact SHA and checked for hashes, rows and the manifest's known frozen schema. The uploaded candidate cannot contain its own hash or commit SHA: the command deterministically derives the final published manifest by adding only that downloaded candidate hash, ledger revision, published state and ledger staging provenance, then requires canonical equality with the local final manifest. It never edits a mismatching local manifest. Only after all checks pass does it persist the published digest with `legacy_attestation` evidence containing method `legacy-remote-attestation`, commit_sha and attested_at. Missing ledger revision, changed local/remote manifest, payload mismatch or scan failure leaves the publication untrusted. Candidate-supplied staging provenance is discarded; only a strictly shaped ledger staging revision can be added back. The normal public release allowlist also applies to every attested file, so raw envelopes cannot become retained publication ownership. All pinned Hub downloads (verification, repair, promotion and attestation) share a bounded 256 MiB byte reader: standard snapshot-to-blob cache symlinks and plain files are supported, but the resolved target must be a regular file strictly inside the configured cache directory. Local data_root metadata keeps the separate no-link 16 MiB boundary. Nonpublished validated/uploaded-candidate queries must match the ledger's validated canonical manifest digest and full file inventory before selecting a schema version or replaying raw evidence. Back up the ledger before operator maintenance; do not manually insert a digest from mutable local files.
+
+## HF credential roles and CLI output
+
+Configure `hugging_face_write` (`HF_TOKEN_WRITE`) for publish, promotion and
+restoration writes; configure `hugging_face_read` (`HF_TOKEN_READ`) for remote
+verification, downloads and read-only legacy attestation. Environment variables
+win over their corresponding files; an explicitly empty or invalid role credential
+fails closed, never falling back to a more privileged token. All configured aliases
+(including legacy aliases) participate in secret scanning.
+
+Legacy `hugging_face` / `HF_TOKEN` remains a write fallback and, only when no read
+alias is configured, a read fallback. `diagnose` reports both roles without values
+and emits `legacy_hugging_face_used_for_read` when the legacy token supplies reads.
+A new write alias alone does not supply reads: configure a read token explicitly.
+
+CLI runs disable Hub progress bars and the Windows symlink cache warning only in
+the CLI process. Residual library output goes to stderr; stdout is one JSON result.
 
 ## 로컬 조회 MCP (stdio)
 

@@ -5,6 +5,9 @@ from pathlib import Path
 
 import pytest
 
+
+pytestmark = pytest.mark.slow
+
 from kapa_runtime import pipeline as p
 from kapa_runtime.releases.manifest import load_manifest, dump_manifest
 from kapa_runtime.storage.state import StateStore

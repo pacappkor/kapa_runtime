@@ -6,6 +6,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+
+pytestmark = pytest.mark.slow
+
 from kapa_runtime import pipeline as p
 from kapa_runtime.releases.manifest import load_manifest, dump_manifest
 from kapa_runtime.storage.parquet import schema_for

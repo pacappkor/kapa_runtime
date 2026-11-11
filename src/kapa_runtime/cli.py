@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import redirect_stdout
 import json
+import logging
+import os
 import sys
 from pathlib import Path
 
@@ -14,7 +17,32 @@ from . import pipeline
 from .releases.hf import PublishError
 
 
+def _quiet_hub() -> None:
+    # Process-local only: never alter the user's global environment or config.
+    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+    from huggingface_hub import constants
+    from huggingface_hub.utils import disable_progress_bars
+    from importlib import import_module
+    constants.HF_HUB_DISABLE_SYMLINKS_WARNING = True
+    constants.HF_HUB_DISABLE_PROGRESS_BARS = True
+    # The utility captures this constant at import time; override a preexisting
+    # HF_HUB_DISABLE_PROGRESS_BARS=0 for this CLI process as well.
+    import_module("huggingface_hub.utils.tqdm").HF_HUB_DISABLE_PROGRESS_BARS = True
+    disable_progress_bars()
+    # Hub loggers may have inherited a caller's stdout handler. Own this
+    # library's CLI handler instead of changing global logging configuration.
+    logger = logging.getLogger("huggingface_hub")
+    logger.handlers = [logging.StreamHandler(sys.stderr)]
+    logger.propagate = False
+    for name, child in logging.root.manager.loggerDict.items():
+        if name.startswith("huggingface_hub.") and isinstance(child, logging.Logger):
+            child.handlers = []
+            child.propagate = True
+
+
 def main(argv=None) -> int:
+    _quiet_hub()
     # Real console/redirection streams must not inherit a Windows legacy code
     # page. StringIO/test capture streams already carry Unicode and may lack it.
     reconfigure = getattr(sys.stdout, "reconfigure", None)
@@ -51,15 +79,18 @@ def main(argv=None) -> int:
     try:
         settings = RuntimeSettings.load(config)
         if name == "diagnose":
-            diagnostics = [diagnose(alias, settings) for alias in ENV_NAMES]
+            diagnostics = [diagnose(alias, settings)
+                           for alias in pipeline._secret_aliases(settings, hf=True)]
             output = {"credentials": diagnostics}
             code = 0 if all(d["status"] == "ok" for d in diagnostics) else 1
         else:
             if name == "query":
                 controls = {k: args.pop(k) for k in ("release_id", "limit", "cursor")}
-                output = pipeline.query(settings, filters={k: v for k, v in args.items() if v is not None}, **controls)
+                with redirect_stdout(sys.stderr):
+                    output = pipeline.query(settings, filters={k: v for k, v in args.items() if v is not None}, **controls)
             else:
-                output = getattr(pipeline, name.replace("-", "_"))(settings, **args)
+                with redirect_stdout(sys.stderr):
+                    output = getattr(pipeline, name.replace("-", "_"))(settings, **args)
             code = 1 if output.get("state") in ("failed", "partial", "quarantined") else 0
     except ConfigurationError:
         output, code = {"status": "error", "error_code": "configuration_error"}, 2

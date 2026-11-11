@@ -276,7 +276,7 @@ class _HubWriter:
     def __init__(self, api, namespace: str, repo_name: str, *,
                  role: str, terms_evidence=None,
                  secret_values: Callable[[], Iterable] = lambda: (), expected_visibility="private",
-                 restoration=None):
+                 restoration=None, read_token=None, write_token=None):
         if not all(isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", v)
                    for v in (namespace, repo_name)):
             raise PublishError("Explicit namespace and repository name required")
@@ -298,14 +298,24 @@ class _HubWriter:
                        for entry in terms_evidence.values()))):
             raise PublishError("Public market publication requires reviewed terms evidence")
         from ..credentials import Secret
-        self._token = getattr(api, "token", False)
+        self._token = getattr(api, "token", False) if write_token is None else write_token
         if hasattr(api, "token") and (not isinstance(self._token, str) or not self._token.strip()):
             raise PublishError("API must carry an explicit token, not ambient credentials")
+        self._read_token = self._token if read_token is None else read_token
+        if not (self._read_token is False or isinstance(self._read_token, str) and self._read_token.strip()):
+            raise PublishError("Explicit valid read token required")
         loaded_secrets = tuple(secret_values())
         if not loaded_secrets:
             raise PublishError("Nonempty secret scan set required", reason="local_scan")
+        # An injected API can carry another credential even when explicit role
+        # tokens override it for calls. Retain that value in the scan set too.
+        api_token = getattr(api, "token", False)
+        if isinstance(api_token, str):
+            loaded_secrets += (Secret(api_token),)
         if isinstance(self._token, str):
             loaded_secrets += (Secret(self._token),)
+        if isinstance(self._read_token, str):
+            loaded_secrets += (Secret(self._read_token),)
         # Validate every needle now, including empty values, before any Hub call.
         scan_secret_payload(b"", "scan-validation", loaded_secrets)
         for identifier in (namespace, repo_name, f"{namespace}/{repo_name}"):
@@ -317,7 +327,7 @@ class _HubWriter:
         self.secret_values = lambda: loaded_secrets
 
     def _private(self) -> None:
-        info = self.api.repo_info(self.repo_id, repo_type="dataset", token=self._token)
+        info = self.api.repo_info(self.repo_id, repo_type="dataset", token=self._read_token)
         if getattr(info, "private", None) is not self.expected_private:
             raise PublishError("Dataset visibility differs from explicit configuration")
 
@@ -383,7 +393,7 @@ class _HubWriter:
                     payload = None
                     try:
                         candidate = download_bytes(self.api, self.repo_id, name,
-                            revision=parent, token=self._token, cache_dir=cache_dir)
+                            revision=parent, token=self._read_token, cache_dir=cache_dir)
                         digest = hashlib.sha256(candidate).hexdigest()
                         owner = next((e for e in entries if e['sha256'] == digest), None)
                         if owner is None:
@@ -435,20 +445,20 @@ class _HubWriter:
             raise PublishError("Credential-like filenames are forbidden", reason="local_scan")
 
     def _require_head(self, expected):
-        info = self.api.repo_info(self.repo_id, repo_type="dataset", token=self._token)
+        info = self.api.repo_info(self.repo_id, repo_type="dataset", token=self._read_token)
         if getattr(info, "private", None) is not self.expected_private:
             raise PublishError("Dataset visibility differs from explicit configuration")
         if getattr(info, "sha", None) != expected:
             raise PublishError("Default-branch head changed")
 
     def _head_tree(self):
-        info = self.api.repo_info(self.repo_id, repo_type="dataset", token=self._token)
+        info = self.api.repo_info(self.repo_id, repo_type="dataset", token=self._read_token)
         if getattr(info, "private", None) is not self.expected_private:
             raise PublishError("Dataset visibility differs from explicit configuration")
         sha = getattr(info, "sha", None)
         if not isinstance(sha, str) or not SHA.fullmatch(sha):
             raise PublishError("Full default-branch head SHA required")
-        remote = self.api.list_repo_files(self.repo_id, repo_type="dataset", revision=sha, token=self._token)
+        remote = self.api.list_repo_files(self.repo_id, repo_type="dataset", revision=sha, token=self._read_token)
         if not isinstance(remote, list) or len(set(remote)) != len(remote):
             raise PublishError("Complete remote inventory required")
         for name in remote:
@@ -504,7 +514,7 @@ class _HubWriter:
                 if evidence_store is None:
                     raise PublishError("Durable repository evidence required")
                 payload = download_bytes(self.api, self.repo_id, ".gitattributes",
-                    revision=parent, cache_dir=cache_dir, token=self._token)
+                    revision=parent, cache_dir=cache_dir, token=self._read_token)
                 scan_secret_payload(payload, ".gitattributes", self.secret_values())
                 digest = hashlib.sha256(payload).hexdigest()
             if evidence_store is not None:
@@ -524,13 +534,13 @@ class _HubWriter:
         self._private()
         if not isinstance(sha, str) or not SHA.fullmatch(sha):
             raise PublishError("Full restoration revision required")
-        remote = self.api.list_repo_files(self.repo_id, repo_type="dataset", revision=sha, token=self._token)
+        remote = self.api.list_repo_files(self.repo_id, repo_type="dataset", revision=sha, token=self._read_token)
         if not isinstance(remote, list) or len(remote) != len(payloads) or set(remote) != set(payloads):
             raise PublishError("Restoration inventory mismatch")
         for name, expected in payloads.items():
             self._scan_path(name)
             payload = download_bytes(self.api, self.repo_id, name, revision=sha,
-                token=self._token, cache_dir=cache_dir)
+                token=self._read_token, cache_dir=cache_dir)
             if len(payload) != len(expected) or hashlib.sha256(payload).digest() != hashlib.sha256(expected).digest():
                 raise PublishError("Restoration hash mismatch")
             scan_secret_payload(payload, name, self.secret_values(), schema_version=self._journal_schema(payload, name))
@@ -570,7 +580,7 @@ class _HubWriter:
                     retained[name] = [entry]
             allowed = current_paths | set(retained) | {".gitattributes"}
             remote = self.api.list_repo_files(self.repo_id, repo_type="dataset",
-                                              revision=commit_sha, token=self._token)
+                                              revision=commit_sha, token=self._read_token)
             if not isinstance(remote, list):
                 raise PublishError("Complete remote inventory required")
             tree_enumerated = True
@@ -588,7 +598,7 @@ class _HubWriter:
             if ".gitattributes" in remote:
                 payload = download_bytes(self.api, self.repo_id, ".gitattributes",
                                                      revision=commit_sha, cache_dir=cache_dir,
-                                                     token=self._token)
+                                                     token=self._read_token)
                 scan_secret_payload(payload, ".gitattributes", self.secret_values())
                 digest = hashlib.sha256(payload).hexdigest()
                 inventory[".gitattributes"] = (digest, m["data_schema_version"])
@@ -607,7 +617,7 @@ class _HubWriter:
             try:
                 payload = download_bytes(self.api, self.repo_id, name,
                                                      revision=commit_sha, cache_dir=cache_dir,
-                                                     token=self._token)
+                                                     token=self._read_token)
                 digest = hashlib.sha256(payload).hexdigest()
                 owner = next((e for e in retained[name] if e['sha256'] == digest), None)
                 if owner is None:
@@ -626,7 +636,7 @@ class _HubWriter:
             try:
                 payload = download_bytes(self.api, self.repo_id, entry["path"],
                                                      revision=commit_sha, cache_dir=cache_dir,
-                                                     token=self._token)
+                                                     token=self._read_token)
                 if hashlib.sha256(payload).hexdigest() != entry["sha256"]:
                     errors.append("hash_mismatch")
                     continue

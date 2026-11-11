@@ -2,6 +2,9 @@
 from dataclasses import replace
 
 import pytest
+
+
+pytestmark = pytest.mark.slow
 from huggingface_hub import CommitOperationDelete
 
 from kapa_runtime import pipeline as p

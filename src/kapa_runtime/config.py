@@ -57,7 +57,7 @@ class RuntimeSettings:
                 credentials = {k: v["fallback_file"] for k, v in raw.get("credentials", {}).items()
                                if "fallback_file" in v}
             if not isinstance(credentials, dict) or set(credentials) - {
-                "data_go_kr", "hugging_face", "rone", "vworld"
+                "data_go_kr", "hugging_face", "hugging_face_write", "hugging_face_read", "rone", "vworld"
             }:
                 raise ValueError()
             files = {k: resolve(v) for k, v in credentials.items()}

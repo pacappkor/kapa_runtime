@@ -4,6 +4,9 @@ from pathlib import Path
 
 import pytest
 
+
+pytestmark = pytest.mark.slow
+
 from kapa_runtime import pipeline as p
 from kapa_runtime.credentials import Secret, redact
 from kapa_runtime.releases.hf import _HubWriter, PublishError, scan_secret_payload

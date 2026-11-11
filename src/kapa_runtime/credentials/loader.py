@@ -14,6 +14,8 @@ from kapa_runtime.config import RuntimeSettings
 ENV_NAMES = {
     "data_go_kr": "DATA_GO_KR_SERVICE_KEY",
     "hugging_face": "HF_TOKEN",
+    "hugging_face_write": "HF_TOKEN_WRITE",
+    "hugging_face_read": "HF_TOKEN_READ",
     "rone": "RONE_API_KEY",
     "vworld": "VWORLD_API_KEY",
 }
@@ -86,9 +88,19 @@ def _read_file(path: Path) -> tuple[str | None, str | None]:
     return value, error
 
 
+def _effective_alias(alias: str, settings: RuntimeSettings, env: Mapping[str, str]) -> str:
+    # Defined-but-empty role credentials must fail closed. Only legacy fallback
+    # is allowed: a new write token must never become the default read token.
+    if (alias in ("hugging_face_write", "hugging_face_read")
+            and ENV_NAMES[alias] not in env and alias not in settings.credential_files):
+        return "hugging_face"
+    return alias
+
+
 def load_secret(alias: str, settings: RuntimeSettings, env: Mapping[str, str] = os.environ) -> Secret:
     if alias not in ENV_NAMES:
         raise CredentialError("unknown_alias")
+    alias = _effective_alias(alias, settings, env)
     name = ENV_NAMES[alias]
     if name in env:
         value, error = _parse(env[name])
@@ -104,8 +116,9 @@ def load_secret(alias: str, settings: RuntimeSettings, env: Mapping[str, str] = 
 
 
 def diagnose(alias: str, settings: RuntimeSettings, env: Mapping[str, str] = os.environ) -> dict:
-    name = ENV_NAMES.get(alias)
-    source = "env" if name in env else "file" if alias in settings.credential_files else "missing"
+    effective = _effective_alias(alias, settings, env)
+    name = ENV_NAMES.get(effective)
+    source = "env" if name in env else "file" if effective in settings.credential_files else "missing"
     code = None
     try:
         load_secret(alias, settings, env)
@@ -113,7 +126,16 @@ def diagnose(alias: str, settings: RuntimeSettings, env: Mapping[str, str] = os.
         code = error.error_code
     if code == "missing_file":
         source = "missing"
-    return {"alias": alias, "source": source, "status": "error" if code else "ok", "error_code": code}
+    result = {"alias": alias, "source": source, "status": "error" if code else "ok", "error_code": code}
+    if alias == "hugging_face":
+        result["usage"] = ["secret_scan"] + [
+            role for role in ("hugging_face_write", "hugging_face_read")
+            if _effective_alias(role, settings, env) == alias
+        ]
+    if alias in ("hugging_face_write", "hugging_face_read") and effective != alias and source != "missing":
+        result["warning"] = ("legacy_hugging_face_used_for_read" if alias == "hugging_face_read"
+                             else "legacy_hugging_face_used_for_write")
+    return result
 
 
 def redact(text: str, secrets: Iterable[Secret]) -> str:

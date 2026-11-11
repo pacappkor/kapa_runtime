@@ -7,6 +7,9 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+
+
+pytestmark = pytest.mark.slow
 from huggingface_hub import CommitOperationDelete
 from huggingface_hub.errors import RepositoryNotFoundError
 

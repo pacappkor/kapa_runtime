@@ -6,6 +6,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+
+pytestmark = pytest.mark.slow
 from publication_fixture import seal_publication
 
 from kapa_runtime import pipeline as p

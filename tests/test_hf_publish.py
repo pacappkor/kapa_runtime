@@ -462,3 +462,29 @@ def test_retained_file_content_verified_at_candidate_revision(tmp_path, damage):
     assert report.checked_files == ('data.json',)
     if damage not in ('path_only', 'download'):
         assert ('data/old.parquet', 'b' * 40) in api.downloads
+
+
+def test_hf_read_write_tokens_never_cross_roles(tmp_path):
+    class RoleApi(FakeHfApi):
+        token = "TESTKEY-ambient-unused"
+
+        def __getattribute__(self, name):
+            method = super().__getattribute__(name)
+            if name in {"repo_info", "list_repo_files", "get_paths_info", "hf_hub_download",
+                        "create_repo", "create_commit"}:
+                def checked(*args, **kwargs):
+                    expected = "TESTKEY-write" if name in {"create_repo", "create_commit"} else "TESTKEY-read"
+                    assert kwargs["token"] == expected
+                    return method(*args, **kwargs)
+                return checked
+            return method
+
+    api = RoleApi(exists=False)
+    publisher = _HubWriter(api, "owner", "data", role="market",
+        secret_values=lambda: [FakeSecret()], read_token="TESTKEY-read", write_token="TESTKEY-write")
+    publisher.ensure_private_repo()
+    (tmp_path / "data.json").write_bytes(b"{}")
+    sha = publisher.upload_candidate(tmp_path, ["data.json"])
+    manifest = manifest_for(api.files)
+    assert publisher.verify(sha, manifest, tmp_path / "cache").passed
+    publisher._verify_inventory(sha, api.files, tmp_path / "inventory")

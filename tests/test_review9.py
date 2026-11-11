@@ -10,6 +10,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+
+pytestmark = pytest.mark.slow
+
 from kapa_runtime import pipeline as p
 from kapa_runtime.config import RuntimeSettings, ConfigurationError
 from kapa_runtime.credentials import Secret, redact

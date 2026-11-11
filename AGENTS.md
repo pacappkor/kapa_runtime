@@ -18,7 +18,7 @@ Design source of truth: `../design/01..08` (workspace root, not in this repo). R
 Shared types: `kapa_runtime.models` (Observation, TransactionRecord, ObservationStatus, ReleaseState, MatchStatus). Do not change without orchestrator coordination.
 
 ### config.py (agent A)
-`RuntimeSettings` frozen dataclass: `workspace: Path`, `data_root: Path`, `credential_files: dict[str, Path]` (aliases `data_go_kr`, `hugging_face`, `rone`, `vworld`), `hf_namespace: str | None`, `hf_repos: dict[str, str]`. `RuntimeSettings.load(path: Path | None = None)` reads JSON from the explicit path or `KAPA_RUNTIME_CONFIG`; relative paths resolve against the config file directory. Derived: `staging_dir`, `snapshots_dir`, `cache_dir`, `state_db`, `manifests_dir`, `active_manifest`.
+`RuntimeSettings` frozen dataclass: `workspace: Path`, `data_root: Path`, `credential_files: dict[str, Path]` (aliases `data_go_kr`, `hugging_face_write`, `hugging_face_read`, legacy `hugging_face`, `rone`, `vworld`), `hf_namespace: str | None`, `hf_repos: dict[str, str]`. `RuntimeSettings.load(path: Path | None = None)` reads JSON from the explicit path or `KAPA_RUNTIME_CONFIG`; relative paths resolve against the config file directory. Derived: `staging_dir`, `snapshots_dir`, `cache_dir`, `state_db`, `manifests_dir`, `active_manifest`.
 
 ### credentials/ (agent A)
 - `Secret`: wraps a value; `repr`/`str` → `Secret(***)`; `.reveal()` only for the HTTP/HF call site.
@@ -50,3 +50,14 @@ Both: params `LAWD_CD` (5 digits), `DEAL_YMD` (YYYYMM), `pageNo`, `numOfRows`; `
 
 ### cli.py (orchestrator integrates; agent A stubs)
 `kapa-runtime diagnose` (credential diagnostics, no values), later `collect`, `build`, `publish`, `activate`.
+
+## Test selection
+
+Fast local checks (default selection for iterative work):
+`uv run --locked --extra test python -I -B -m pytest -p no:cacheprovider -m "not slow" -q`
+
+Full suite (required before handoff; CI continues to run all tests):
+`uv run --locked --extra test python -I -B -m pytest -p no:cacheprovider -q`
+
+The `slow` marker covers pipeline, public promotion, legacy attestation and review
+integration modules. No global marker filter is configured; plain pytest runs all.

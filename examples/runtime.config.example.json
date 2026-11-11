@@ -4,7 +4,8 @@
   "data_root": "../../_kapa_data",
   "credential_files": {
     "data_go_kr": "../../data_gov_key.txt",
-    "hugging_face": "../../hf_token.txt",
+    "hugging_face_write": "../../hf_write_token.txt",
+    "hugging_face_read": "../../hf_read_token.txt",
     "rone": "../../rone_key.txt",
     "vworld": "../../vworld_key.txt"
   },

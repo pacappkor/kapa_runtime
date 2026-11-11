@@ -22,7 +22,7 @@ def test_diagnose_only_synthetic_config(tmp_path, monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "TESTKEY" not in output
     parsed = json.loads(output)
-    assert len(parsed["credentials"]) == 4
+    assert {item["alias"] for item in parsed["credentials"]} == set(ENV_NAMES)
     assert all(item["source"] == "env" and item["status"] == "ok" for item in parsed["credentials"])
 
 
@@ -125,3 +125,53 @@ def test_requires_command():
     with pytest.raises(SystemExit) as caught:
         main([])
     assert caught.value.code == 2
+
+
+def test_diagnose_warns_about_legacy_read(tmp_path, monkeypatch, capsys):
+    config = tmp_path / "runtime.json"
+    config.write_text('{"workspace":"."}')
+    monkeypatch.setenv("HF_TOKEN", "TESTKEY-legacy")
+    main(["diagnose", "--config", str(config)])
+    output = capsys.readouterr().out
+    roles = {item["alias"]: item for item in json.loads(output)["credentials"]}
+    assert roles["hugging_face_read"]["warning"] == "legacy_hugging_face_used_for_read"
+    assert roles["hugging_face_write"]["status"] == "ok"
+    assert "TESTKEY" not in output
+
+
+def test_publish_fake_api_stdout_is_exactly_one_json(tmp_path, monkeypatch, capsys):
+    import os
+    from huggingface_hub import constants
+    from huggingface_hub.utils import are_progress_bars_disabled
+    from kapa_runtime import pipeline
+    from kapa_runtime.releases.hf import _HubWriter
+    from kapa_runtime.credentials import Secret
+    from test_hf_publish import FakeHfApi
+
+    class NoisyApi(FakeHfApi):
+        def create_commit(self, *args, **kwargs):
+            import logging
+            print("synthetic library output")
+            logging.getLogger("huggingface_hub.file_download").warning("synthetic Hub log")
+            assert are_progress_bars_disabled()
+            assert constants.HF_HUB_DISABLE_SYMLINKS_WARNING
+            assert os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] == "1"
+            assert os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] == "1"
+            return super().create_commit(*args, **kwargs)
+
+    from importlib import import_module
+    monkeypatch.setattr(import_module("huggingface_hub.utils.tqdm"), "HF_HUB_DISABLE_PROGRESS_BARS", False)
+    monkeypatch.setenv("HF_HUB_DISABLE_PROGRESS_BARS", "0")
+    config = tmp_path / "runtime.json"
+    config.write_text('{"workspace":"."}')
+    (tmp_path / "data.json").write_bytes(b"{}")
+    def publish(settings, **kwargs):
+        publisher = _HubWriter(NoisyApi(), "owner", "data", role="market",
+            secret_values=lambda: [Secret("TESTKEY-fake")])
+        return {"state": "published", "commit_sha": publisher.upload_candidate(tmp_path, ["data.json"])}
+    monkeypatch.setattr(pipeline, "publish", publish)
+    assert main(["publish", "--config", str(config), "--release-id", "r1"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == json.dumps({"state": "published", "commit_sha": "b" * 40}) + chr(10)
+    assert "synthetic library output" in captured.err
+    assert "synthetic Hub log" in captured.err

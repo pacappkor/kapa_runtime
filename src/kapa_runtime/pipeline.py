@@ -107,15 +107,24 @@ def _hash(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _loaded_secrets(settings, *, hf=False):
-    # Never silently fall back to an empty scan set. The two P0 credentials are
-    # mandatory for publishing; scan any other explicitly configured aliases too.
+def _secret_aliases(settings, *, hf=False, read_only=False):
+    # Keep diagnostics and publication aligned, including unused credentials
+    # that must still be loaded for secret scanning.
     from .credentials.loader import ENV_NAMES
     aliases = {"data_go_kr"} | set(settings.credential_files)
     aliases.update(alias for alias, name in ENV_NAMES.items() if name in os.environ)
     if hf:
-        aliases.add("hugging_face")
-    secrets = [load_secret(alias, settings) for alias in sorted(aliases)]
+        aliases.add("hugging_face_read")
+        if not read_only:
+            aliases.add("hugging_face_write")
+    return sorted(aliases)
+
+
+def _loaded_secrets(settings, *, hf=False, read_only=False):
+    # Never silently fall back to an empty scan set. The two P0 credentials are
+    # mandatory for publishing; scan any other explicitly configured aliases too.
+    secrets = [load_secret(alias, settings)
+               for alias in _secret_aliases(settings, hf=hf, read_only=read_only)]
     from .releases.hf import scan_secret_payload
     for name in (settings.hf_namespace, *settings.hf_repos.values(), *settings.hf_staging_names.values()):
         if name is not None:
@@ -510,10 +519,11 @@ class _HubApi:
         return hf_hub_download(*args, **kwargs)
 
 
-def _publisher(settings, api=None, *, staging=False, restoration=None):
-    secrets = _loaded_secrets(settings, hf=True)
+def _publisher(settings, api=None, *, staging=False, restoration=None, read_only=False):
+    secrets = _loaded_secrets(settings, hf=True, read_only=read_only)
     _require(bool(secrets), "secret_scan_set_required")
-    hf_secret = load_secret("hugging_face", settings)
+    hf_secret = load_secret("hugging_face_read" if read_only else "hugging_face_write", settings)
+    read_secret = load_secret("hugging_face_read", settings)
     name = settings.hf_repos.get("market")
     if staging:
         name = settings.hf_staging_names.get("market", name + "-staging")
@@ -521,7 +531,7 @@ def _publisher(settings, api=None, *, staging=False, restoration=None):
                        name, secret_values=lambda: secrets, role="market",
                        terms_evidence=({s: _policy(settings).get("services", {}).get(s, {}) for s in SERVICES}
                                        if restoration is None else None),
-                       restoration=restoration,
+                       restoration=restoration, read_token=read_secret.reveal(), write_token=hf_secret.reveal(),
                        expected_visibility="private" if staging else settings.hf_visibilities.get("market", "private"))
 
 
@@ -731,13 +741,13 @@ def _public_restore_inventory(settings, store, publisher):
         _require(report is not None, "public_restore_inventory_unverified")
         for name, digest, _ in report.verified_inventory:
             payload = download_bytes(publisher.api, publisher.repo_id, name, revision=revision,
-                cache_dir=settings.cache_dir / "restore-frozen", token=publisher._token)
+                cache_dir=settings.cache_dir / "restore-frozen", token=publisher._read_token)
             _require(hashlib.sha256(payload).hexdigest() == digest, "public_restore_bytes_changed")
             payloads[name] = payload
     if ".gitattributes" in remote:
         payload = download_bytes(publisher.api, publisher.repo_id, ".gitattributes",
                          revision=revision, cache_dir=settings.cache_dir / "restore-attributes",
-                         token=publisher._token)
+                         token=publisher._read_token)
         from .releases.hf import scan_secret_payload
         scan_secret_payload(payload, ".gitattributes", publisher.secret_values())
         store.bind_repository_attributes(publisher.repo_id, hashlib.sha256(payload).hexdigest())
@@ -785,7 +795,7 @@ def publish(settings, *, release_id, dry_run=False, api=None):
             return {"release_id": release_id, "dry_run": True, "visibility": visibility, "repo_id": settings.hf_namespace + "/" + settings.hf_repos["market"], "allowlist": allowlist}
         publisher = _publisher(settings, api)
         publisher.ensure_private_repo()
-        visibility_checked = publisher.api.repo_info(publisher.repo_id, repo_type="dataset", token=publisher._token).private is publisher.expected_private
+        visibility_checked = publisher.api.repo_info(publisher.repo_id, repo_type="dataset", token=publisher._read_token).private is publisher.expected_private
         _require(visibility_checked, "repository_visibility_mismatch")
         staging_ref = None
         warnings = []
@@ -827,7 +837,7 @@ def publish(settings, *, release_id, dry_run=False, api=None):
             for name, digest, _ in report.verified_inventory:
                 payload = download_bytes(staging.api, staging.repo_id, name,
                     revision=staging_sha, cache_dir=settings.cache_dir / (release_id + "-promote"),
-                    token=staging._token)
+                    token=staging._read_token)
                 _require(hashlib.sha256(payload).hexdigest() == digest, "staging_bytes_changed")
                 payloads[name] = payload
             restore, restore_parent = _public_restore_inventory(settings, store, publisher)
@@ -918,7 +928,7 @@ def attest_legacy(settings, *, release_id, api=None):
         _require(len(refs) == 1, "legacy_ledger_revision_required")
         repo_id, sha = refs.pop()
         _require(isinstance(sha, str) and re.fullmatch(r"[0-9a-fA-F]{40}", sha), "legacy_ledger_revision_required")
-        publisher = _publisher(settings, api)
+        publisher = _publisher(settings, api, read_only=True)
         _require(repo_id == publisher.repo_id, "legacy_target_mismatch")
         publisher._private()
         local = _read_manifest(_manifest_path(settings, release_id))
@@ -928,7 +938,7 @@ def attest_legacy(settings, *, release_id, api=None):
         def download(name):
             publisher._scan_path(name)
             return download_bytes(publisher.api, repo_id, name, revision=sha,
-                cache_dir=settings.cache_dir / (release_id + "-attestation"), token=publisher._token)
+                cache_dir=settings.cache_dir / (release_id + "-attestation"), token=publisher._read_token)
         remote_payload = download("manifests/release.json")
         scan_secret_payload(remote_payload, "manifests/release.json", publisher.secret_values())
         remote = loads_manifest(remote_payload.decode("utf-8"))
@@ -976,7 +986,7 @@ def _require_target_served_at_head(settings, store, publisher, manifest):
                 continue
             _require(name in remote, 'active_target_not_served_at_head')
             payload = download_bytes(publisher.api, publisher.repo_id, name, revision=head,
-                cache_dir=settings.cache_dir / 'active-target-head', token=publisher._token)
+                cache_dir=settings.cache_dir / 'active-target-head', token=publisher._read_token)
             _require(hashlib.sha256(payload).hexdigest() == entry['sha256'], 'active_target_not_served_at_head')
             scan_secret_payload(payload, name, publisher.secret_values(), schema_version=manifest['data_schema_version'])
             _require(pq.read_metadata(pa.BufferReader(payload)).num_rows == entry['rows'], 'active_target_not_served_at_head')
@@ -996,7 +1006,7 @@ def activate(settings, *, release_id, api=None):
             pointer = _read_manifest(settings.active_manifest)
             _trusted_published_manifest(settings, store, pointer["release_id"], path=settings.active_manifest)
         _verify_local(settings.snapshots_dir / release_id, m)
-        publisher = _publisher(settings, api)
+        publisher = _publisher(settings, api, read_only=True)
         ref = next(r for r in m["hugging_face_revisions"] if r["repo_id"] == publisher.repo_id)
         report = publisher.verify(ref["commit_sha"], m, settings.cache_dir / release_id,
                                   previous_files=_previous_repo_files(settings, store, publisher.repo_id,
@@ -1020,7 +1030,7 @@ def rollback(settings, *, api=None):
         _verify_local(settings.snapshots_dir / previous["release_id"], previous)
         row = store.get_release(previous["release_id"])
         _require(row is not None and row["state"] in ("published", "active"), "rollback_state_mismatch")
-        publisher = _publisher(settings, api)
+        publisher = _publisher(settings, api, read_only=True)
         ref = next((r for r in previous["hugging_face_revisions"] if r["repo_id"] == publisher.repo_id), None)
         _require(ref is not None, "rollback_revision_missing")
         report = publisher.verify(ref["commit_sha"], previous, settings.cache_dir / previous["release_id"],
