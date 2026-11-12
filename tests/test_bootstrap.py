@@ -22,6 +22,35 @@ def legacy(settings):
     return settings, api
 
 
+@pytest.mark.parametrize('dry_run', [False, True])
+@pytest.mark.parametrize('state', [None, 'preparing', 'built'])
+@pytest.mark.parametrize('identifier', ['release', 'import'])
+def test_secret_identifier_rejected_before_bootstrap_writes(settings, dry_run, state, identifier):
+    from kapa_runtime.releases.hf import PublishError
+    secret = 'TESTKEY-bootstrap-not-real'
+    settings.credential_files['hugging_face'].write_text(secret, encoding='utf-8')
+    tainted = 'prefix-' + secret + '-suffix'
+    release_id = tainted if identifier == 'release' else 'boot'
+    imports = [tainted] if identifier == 'import' else []
+    # Existing frozen jobs must be checked before either preparation or publication
+    # retries can consume them, even after the configured credentials change.
+    frozen = json.dumps(dict(kind='bootstrap', explicit_imports=imports))
+    with StateStore(settings.state_db) as store:
+        store.migrate_jobs()
+        if state is not None:
+            store._connection.execute('INSERT INTO collection_jobs VALUES (?,?,?)',
+                                      (release_id, state, frozen))
+        before = store._connection.execute('SELECT * FROM collection_jobs').fetchall()
+    with pytest.raises(PublishError, match='configured secret'):
+        bootstrap_cumulative(settings, release_id=release_id,
+                             import_release=imports, dry_run=dry_run)
+    with StateStore(settings.state_db) as store:
+        assert store._connection.execute('SELECT * FROM collection_jobs').fetchall() == before
+    assert not settings.snapshots_dir.exists()
+    assert not settings.manifests_dir.exists()
+    assert not settings.cache_dir.exists()
+
+
 def test_rollout(legacy, monkeypatch):
     settings, api = legacy
     original = (settings.manifests_dir / 'r1.json').read_bytes()

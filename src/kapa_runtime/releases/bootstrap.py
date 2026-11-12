@@ -126,6 +126,7 @@ def bootstrap_cumulative(settings, *, release_id, import_release=None, dry_run=F
     imports = sorted(set(import_release or []))
     for rid in imports:
         p._id(rid)
+    p._check_identifiers(p._loaded_secrets(settings), release_id, *imports)
     with StateStore(settings.state_db) as store:
         store.migrate_jobs()
         existing = store._connection.execute('SELECT data,state FROM collection_jobs WHERE job_id=?',
