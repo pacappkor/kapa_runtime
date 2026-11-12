@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: GPL-3.0-only -->
 # ADR-0010: 누적 batch release와 manifest shard 계약
 
-상태: 계약 채택, 운영 통합 전 · 날짜: 2026-11-12 · 관련: issue #3
+상태: 계약 및 step 1–6 코드 통합, 실제 rollout 대기 · 날짜: 2026-11-12 · 관련: issue #3, #8
 
 ## 배경
 
@@ -184,3 +184,29 @@ Successful publication records release guards and then marks the job published.
 Activation remains explicit (`activate --cumulative`); no public current-pointer
 rollback is implied by local rollback. Real publication is **not authorized by
 fake-HF tests**: an operator smoke test and reviewed rollout remain mandatory.
+
+### Step 6: explicit ACTIVE bootstrap implementation
+
+`bootstrap-cumulative --release-id NEW [--import-release OLD ...] [--dry-run]`
+freezes a bootstrap-kind job from current trusted v1 ACTIVE. Original data paths,
+bytes and release/observation/run/time provenance remain unchanged. Import evidence
+is bound to ledger observations, complete collection metadata, raw payload hashes,
+normalization replay and the digest-bound original publication inventory. Missing
+digest requires attest-legacy; missing evidence requires explicit re-observation.
+Imports are explicit complete origins, never Hub file discovery; overlapping
+pairs/paths refuse. Initial migration is bounded to 60 pairs and root limits.
+
+The step-4 engine handles both release kinds, revalidating bootstrap origins instead
+of requiring new collection attempts. Bootstrap does not require the collection
+smoke flag. Subsequent collection/publication still does. Preview materializes a
+temporary snapshot without a persisted job/selection; real runs retain the frozen
+spool, private verification, public reread and recovery semantics. Activation is
+explicitly cumulative; original ledger rows are never rewritten.
+
+Optional operator-policy accumulation_scope (lawd_codes, start, end, batch_cap)
+provides truly bounded rollout through the existing planner, preserving city
+exclusions, quotas, cadence and policy binding. The operator sets the smoke execution
+gate after bootstrap checks and approval, not automatically. Scheduling waits for
+bounded real smoke and small Seoul batch verification. Local rollback is a one-step
+pointer toggle; selecting original v1 uses explicit activate if inventory still
+verifies at head. Public current-view rollback remains a separate operation.

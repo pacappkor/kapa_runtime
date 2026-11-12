@@ -2,7 +2,7 @@
 """Opt-in, local-only pair jobs. No publisher or ACTIVE mutation lives here."""
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 import hashlib
 import json
@@ -16,7 +16,7 @@ import httpx
 from . import pipeline as p
 from .adapters import molit_rtms as adapter
 from .normalization.rtms import normalize
-from .planning import Budget, plan_day
+from .planning import Budget, ServiceRange, plan_day
 from .registry import ServiceRegistry
 from .releases.hf import scan_secret_payload
 from .releases.manifest import build_manifest, dumps_manifest, manifest_digest, relative_path
@@ -112,12 +112,32 @@ def _plan(settings, store, resolved, policy, clock):
                     rent_requests=max(0, limits[1] - store.reserved_requests(SERVICES[1], day)),
                     requests_per_pair=budgets[0],
                     sale_requests_per_pair=budgets[0], rent_requests_per_pair=budgets[1])
+    scope = policy.get("accumulation_scope")
+    ranges = {}
+    if scope is not None:
+        p._require(isinstance(scope, dict) and set(scope) == {"lawd_codes", "start", "end", "batch_cap"},
+                   "invalid_accumulation_scope")
+        selected = scope["lawd_codes"]
+        p._require(isinstance(selected, list) and bool(selected) and
+                   all(isinstance(code, str) for code in selected) and
+                   len(set(selected)) == len(selected) and
+                   set(selected) <= {v["code"] for v in codes}, "invalid_accumulation_scope")
+        p._require(type(scope["batch_cap"]) is int and 1 <= scope["batch_cap"] <= 60,
+                   "invalid_accumulation_scope")
+        from .planning import _month
+        try:
+            p._require(_month(scope["start"]) <= _month(scope["end"]), "invalid_accumulation_scope")
+        except ValueError:
+            raise p.PipelineError("invalid_accumulation_scope") from None
+        codes = [v for v in codes if v["code"] in selected]
+        budget = replace(budget, batch_cap=scope["batch_cap"])
+        ranges = {service: ServiceRange(scope["start"], scope["end"]) for service in ("sale", "rent")}
     coverage = _coverage(resolved, store)
-    plan = plan_day(codes, today=datetime.fromisoformat(day).date(), coverage=coverage, budget=budget)
+    plan = plan_day(codes, today=datetime.fromisoformat(day).date(), coverage=coverage, budget=budget, **ranges)
     if not plan.items and budget.pair_capacity == 0:
         # Persist real work, not an empty terminal job, so tomorrow can resume it.
         plan = plan_day(codes, today=datetime.fromisoformat(day).date(), coverage=coverage,
-                        budget=Budget(requests_per_pair=budget.requests_per_pair, batch_cap=1))
+                        budget=Budget(requests_per_pair=budget.requests_per_pair, batch_cap=1), **ranges)
     return plan, budget, reference
 
 

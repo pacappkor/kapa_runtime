@@ -115,7 +115,7 @@ def _envelope(manifest, repo, sha, candidate_hash, staging=None):
     return result
 
 
-def publish_batch(settings, *, job_id, dry_run=False, api=None, sleep=time.sleep):
+def publish_batch(settings, *, job_id, dry_run=False, api=None, sleep=time.sleep, _preview=None):
     from .. import pipeline as p, accumulation as a
     from .activate import _atomic_write
     p._id(job_id)
@@ -131,6 +131,9 @@ def publish_batch(settings, *, job_id, dry_run=False, api=None, sleep=time.sleep
         pending = [r[0] for r in store._connection.execute('SELECT job_id FROM batch_publications')]
         p._require(not set(pending) - {job_id} and not store.pending_promotions(), 'unresolved_publication')
         job = store._connection.execute('SELECT state,data FROM collection_jobs WHERE job_id=?', (job_id,)).fetchone()
+        if _preview is not None:
+            p._require(dry_run and job is None, 'invalid_publication_preview')
+            job = ('built', _dump(_preview[2]))
         p._require(job is not None and job[0] in ('built', 'published'), 'built_job_required')
         data = json.loads(job[1])
         p._require(a.digest(data['plan']) == data['plan_digest'], 'frozen_plan_changed')
@@ -154,8 +157,8 @@ def publish_batch(settings, *, job_id, dry_run=False, api=None, sleep=time.sleep
             p._require(journal is None, 'unresolved_publication')
             m = p._trusted_published_manifest(settings, store, job_id)
             return dict(state='published', release_id=job_id, commit_sha=m['hugging_face_revisions'][0]['commit_sha'])
-        m = p._read_manifest(settings.manifests_dir / (job_id + '.json'))
-        root = settings.snapshots_dir / job_id
+        m = _preview[0] if _preview else p._read_manifest(settings.manifests_dir / (job_id + '.json'))
+        root = _preview[1] if _preview else settings.snapshots_dir / job_id
         p._require(m['schema_version'] == 'kapa-runtime-release/2', 'v2_snapshot_required')
         # A completed remote transaction may need only its ledger finalization.
         frozen = journal['manifest'] if journal else m
@@ -167,16 +170,23 @@ def publish_batch(settings, *, job_id, dry_run=False, api=None, sleep=time.sleep
         p._require(m['batch_scope']['declared_pairs'] == pairs, 'frozen_batch_changed')
         p._require(1 <= len(m['batch_scope']['declared_pairs']) <= 60, 'batch_cap_exceeded')
         p._verify_local(root, m)
-        store.record_snapshot(m, loader=lambda name: a._load(root, name))
+        if not dry_run:
+            store.record_snapshot(m, loader=lambda name: a._load(root, name))
         def guard():
             check_parent(store, m['parent_snapshot'], active_path=settings.active_manifest, publication_job=job_id)
         guard()
         policy = p._policy(settings)
         p._require(a._terms(policy) == m['quality']['terms_evidence'], 'terms_changed_rebuild_required')
-        p._require(policy.get('accumulation_smoke_verified') is True, 'operator_smoke_required')
+        bootstrap = m['release_kind'] == 'bootstrap'
+        if bootstrap:
+            from .bootstrap import verify_imports
+            p._require(data.get('kind') == 'bootstrap', 'bootstrap_evidence_required')
+            verify_imports(settings, store, m, data['imports'])
+        else:
+            p._require(policy.get('accumulation_smoke_verified') is True, 'operator_smoke_required')
         secrets = p._loaded_secrets(settings)
         resolved = resolve_snapshot(m, lambda name: a._load(root, name))
-        for pair in data['plan']['items']:
+        for pair in ([] if bootstrap else data['plan']['items']):
             completed = a._completed(store, job_id, pair['lawd_code'], pair['deal_ymd'])
             p._require(set(completed) == set(a.SERVICES), 'incomplete_pair')
             for evidence in completed.values():
