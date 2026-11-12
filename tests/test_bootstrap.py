@@ -119,7 +119,7 @@ def test_refuse(legacy, case):
     else:
         with StateStore(settings.state_db) as store:
             store._connection.execute("UPDATE releases SET state='published' WHERE release_id='r1'")
-        message = 'Published-but-not-active'
+        message = 'bootstrap_manifest_invalid'
     with pytest.raises(ValueError, match=message):
         bootstrap_cumulative(settings, release_id='boot', dry_run=True, api=api)
     assert len(api.commits) == 2
