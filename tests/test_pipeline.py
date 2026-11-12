@@ -251,7 +251,7 @@ def test_public_market_explicit_and_mismatch(settings):
     for expected in ("## 출처", "15126469/openapi.do", "15126474/openapi.do", "## 수집 범위",
                      "11110", "202510", "1행; fetched_at:", "## 스키마 요약", "decimal128",
                      "## 한계", "legal_verified=false", "## 재현성", "manifests/release.json",
-                     "synthetic fixture permission"):
+                     "Catalog permission: free redistribution", "https://www.data.go.kr/catalog/15126469/openapi.json"):
         assert expected in card
     assert str(settings.data_root) not in card and KEY not in card
     from test_public_promotion import MultiRepoApi
