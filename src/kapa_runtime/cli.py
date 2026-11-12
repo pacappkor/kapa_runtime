@@ -50,9 +50,14 @@ def main(argv=None) -> int:
         reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(prog="kapa-runtime")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("diagnose", "collect", "build", "publish", "activate", "rollback", "query", "attest-legacy", "plan", "collect-batch", "publish-batch", "bootstrap-cumulative"):
+    for name in ("diagnose", "collect", "build", "publish", "activate", "rollback", "query", "attest-legacy", "plan", "collect-batch", "publish-batch", "bootstrap-cumulative", "state", "daily-run", "clear-stop"):
         command = commands.add_parser(name)
         command.add_argument("--config", type=Path)
+        if name == "state":
+            command.add_argument("state_action", choices=("pull", "push"))
+            command.add_argument("--initial", action="store_true")
+        if name == "daily-run":
+            command.add_argument("--fixture-revision")
         if name in ("build", "publish", "activate", "attest-legacy", "bootstrap-cumulative"):
             command.add_argument("--release-id", required=True)
         if name == "collect":
@@ -92,7 +97,20 @@ def main(argv=None) -> int:
             output = {"credentials": diagnostics}
             code = 0 if all(d["status"] == "ok" for d in diagnostics) else 1
         else:
-            if name in ("plan", "collect-batch"):
+            if name == "state":
+                from . import state_bundle
+                action = args.pop("state_action")
+                initial = args.pop("initial")
+                if action == "pull" and initial:
+                    raise ValueError("initial_only_on_push")
+                with redirect_stdout(sys.stderr):
+                    output = (state_bundle.push(settings, initial=initial) if action == "push"
+                              else state_bundle.pull(settings))
+            elif name in ("daily-run", "clear-stop"):
+                from . import daily
+                with redirect_stdout(sys.stderr):
+                    output = getattr(daily, name.replace("-", "_"))(settings, **args)
+            elif name in ("plan", "collect-batch"):
                 from . import accumulation
                 output = getattr(accumulation, name.replace("-", "_"))(settings, **args)
             elif name == "publish-batch":
@@ -110,7 +128,9 @@ def main(argv=None) -> int:
             else:
                 with redirect_stdout(sys.stderr):
                     output = getattr(pipeline, name.replace("-", "_"))(settings, **args)
-            if name == "collect-batch":
+            if name in ("daily-run", "clear-stop"):
+                code = output.get("exit_code", 0)
+            elif name == "collect-batch":
                 state = output.get("state")
                 if state == "paused":
                     code = 3
