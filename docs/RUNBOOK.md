@@ -500,7 +500,7 @@ shard/data read, return `error` with `active_snapshot_unverified`, never
 `invalid_query` or a normal empty result.
 Fail-closed errors require checking the local snapshot and publication evidence;
 never repair a manifest hash by hand or bypass the ledger. This read path does not
-make the separate cumulative publication/bootstrap rollout operational.
+authorize a real cumulative publication/bootstrap rollout; see the operator checklist below.
 
 ## 누적 batch 게시 (step 4)
 
@@ -543,3 +543,127 @@ head를 임의로 변경하지 않는다. spool은 state DB 옆 `publication-spo
 Operator smoke는 최소 A→B 게시/활성화→C 재관측/게시/활성화→B local rollback,
 각 commit operation 수, 전체 inventory 검증, private staging 실제 visibility 및
 기본 HF config의 archive 중복 배제를 확인한다. 공개 current rollback은 별도 절차다.
+
+## ACTIVE v1 bootstrap rollout (step 6)
+
+Operator procedure only; no task is registered and no smoke is claimed by tests.
+Stop writers and back up the entire `_kapa_data` to an offline location: closed
+SQLite ledger (including any WAL/SHM), manifests/ACTIVE/previous, snapshots,
+staging collection/raw evidence, accumulation and publication-spool. Verify the
+backup is readable; keep it through rollback checks. Never edit ledger digests.
+
+From the runtime checkout, with the reviewed operator configuration:
+
+```sh
+# Only when the original publication lacks a ledger-bound digest:
+uv run --locked kapa-runtime attest-legacy --config runtime.json --release-id r-11110-202510-pacappkor-2
+uv run --locked kapa-runtime bootstrap-cumulative --config runtime.json --release-id bootstrap-active-v2 --dry-run
+uv run --locked kapa-runtime bootstrap-cumulative --config runtime.json --release-id bootstrap-active-v2
+uv run --locked kapa-runtime activate --config runtime.json --release-id bootstrap-active-v2 --cumulative
+uv run --locked kapa-runtime query --config runtime.json --lawd-code 11110
+```
+
+The parent must be current trusted v1 ACTIVE. Resolve published-but-not-active
+states first. `legacy_digest_required_run_attest_legacy` requires attestation.
+`legacy_metadata_unverifiable_reobserve` requires verified original evidence from
+backup or explicit re-observation with legacy collect/build/publish/activate under
+a new ID, followed by bootstrap of that ACTIVE. Never invent missing evidence.
+Original ledger rows, data bytes/paths, observation IDs and observation times stay
+unchanged. Bootstrap is not a new observation or a smoke-completion claim.
+
+Dry-run requires read credentials and existing HF targets; it reports parent and
+manifest digests, partition count, staging/public changed bytes/operations and
+backup instructions. No job, snapshot selection or remote commit is created;
+cache and schema initialization may remain. Real publication reuses the frozen
+step-4 spool and stage → verify → public promotion → verify path. Resume the same
+release ID after interruption; do not bypass journals with a new ID.
+Preparation first persists a `preparing` job with frozen inputs/digest and the new
+release's invocation timestamp. It materializes into a unique temporary directory,
+atomically renames the verified snapshot, then marks the job `built`. Same-ID
+retries verify an installed snapshot or rebuild from the frozen inputs. Abandoned
+`snapshots/bootstrap-preparing-*` temporary directories are never read or reused;
+with all writers stopped, operators may remove these leftovers. A dry-run of a
+`preparing` job refuses with `bootstrap_preparation_resume_required`; resume the
+real command instead. Original partition `fetched_at` timestamps are preserved.
+
+Optional imports use repeatable `--import-release older-release-id` on both preview
+and real commands. Every origin needs a ledger digest, complete two-service
+metadata, original ledger observations, raw hash/replay and verified local snapshot.
+Conflicting pairs/paths refuse. HF file presence never extends coverage. Imports
+are bounded to 60 pairs and the normal manifest/publication limits. Every origin,
+including the parent, must currently be `published` or `active` in the ledger;
+`legacy_serving_state_required` refuses quarantined, failed or other ineligible
+states even when historical publication evidence remains.
+
+### Smoke gate and bounded collection
+
+1. After activation, check MCP `search_transactions` and `get_data_coverage`
+   against v1: original timestamps/provenance, zero status, cancellation exclusions,
+   exact coverage and `legal_verified=false`. Verify staging privacy, pinned SHA
+   rereads, public head inventory and README current-only default files. Test local
+   rollback to v1 and return with explicit activation; preserve evidence locally.
+2. Only after those checks and explicit approval of bounded real collection, set
+   operator-policy `accumulation_smoke_verified: true`. Record approval/time/evidence
+   alongside policy. It is an execution gate, not proof the upcoming batch passed.
+   Leave scheduling disabled until actual smoke completes; set false on any failure.
+3. Set optional operator-policy scope (example reviewed month November 2026):
+
+   ```json
+   "accumulation_scope": {"lawd_codes":["11110"], "start":"202611", "end":"202611", "batch_cap":1}
+   ```
+
+   Scope validates codes after city-aggregate exclusion and preserves both services,
+   cadence and quotas. Scope intersects, never expands, sale history from `200601`
+   and rent history from `201101`, each ending at the current Seoul month. An empty
+   service intersection refuses with `accumulation_scope_empty_service_range`,
+   without creating work or claiming zero coverage.
+   Policy is digest-bound: finish/resume jobs before changing it.
+   Omission restores nationwide planning; do not remove it during initial rollout.
+
+   ```sh
+   uv run --locked kapa-runtime plan --config runtime.json
+   uv run --locked kapa-runtime collect-batch --config runtime.json --job-id seoul-smoke-01 --dry-run
+   uv run --locked kapa-runtime collect-batch --config runtime.json --job-id seoul-smoke-01
+   uv run --locked kapa-runtime publish-batch --config runtime.json --job-id seoul-smoke-01 --dry-run
+   uv run --locked kapa-runtime publish-batch --config runtime.json --job-id seoul-smoke-01
+   uv run --locked kapa-runtime activate --config runtime.json --release-id seoul-smoke-01 --cumulative
+   uv run --locked kapa-runtime query --config runtime.json --lawd-code 11110
+   uv run --locked kapa-runtime rollback --config runtime.json --cumulative
+   ```
+
+   Stop unless plan is exactly one Seoul gu × one month. Check MCP too. Record
+   delta counts, full inventories, original/new provenance and zero handling.
+   Repeat the same pair under a new job ID when due to test re-observation without
+   duplicate current rows; never edit frozen plans or bypass cadence.
+4. Rollback above selects bootstrap locally, not public current view. `previous`
+   is a one-step toggle, not a history stack. Select original v1 explicitly with
+   `uv run --locked kapa-runtime activate --config runtime.json --release-id r-11110-202510-pacappkor-2`.
+   Return with `activate --release-id bootstrap-active-v2 --cumulative`. Both require
+   original inventory still served and verified at head. Never overwrite a live DB
+   with an old backup to force rollback; public current rollback remains separate.
+5. Verify city-aggregate behavior: `41110` (수원시) excluded, active 구 children kept,
+   Seoul `11110` retained. The prefix/name rule is provisional, not availability
+   evidence; confirm via separately approved bounded provider smoke before national
+   rollout. Do not disable exclusions merely to force collection.
+6. After smoke passes, change scope to `lawd_codes:["11110","11140"]`, same month,
+   `batch_cap:2`; review plan and repeat collect/dry-publish/publish/activate/query
+   with new ID `seoul-small-01`. Finish and approve before expanding scope.
+
+### Windows Task Scheduler (documentation only)
+
+Program: fully qualified `uv.exe`; Start in: runtime checkout. Arguments:
+`run --locked kapa-runtime collect-batch --config <absolute-runtime.json> --job-id <persistent-job-id>`.
+Configure no parallel instances. An operator wrapper must persist the pending ID,
+reuse it on pause/crash and assign a new ID only after reviewed completion and
+publication/activation. Do not schedule a fixed completed ID forever. Publication
+and activation remain supervised. Never put credentials in arguments/task XML/logs.
+
+Exit 0: inspect JSON (validated, empty, or dry-run planned). Exit 3: quota pause,
+resume same ID next Seoul day. Exit 1: failure, stop for inspection, not retry loop.
+Exit 2: configuration/CLI error. Publish rate limiting returns 1, not 3. Log
+value-free JSON plus exit codes. Stop on parent/head/digest/visibility changes,
+blocked jobs, auth/schema errors, missing origin/raw bytes, unreconciled journals,
+unexpected pairs, row/zero anomalies, archive duplication or backup failure.
+Monitor per-service reservations, disk/spool growth, commit operations, selected
+coverage, oldest timestamps and refresh SLA shortfalls. Never delete spool/journals
+to clear stops. No scheduled task is registered by this implementation.

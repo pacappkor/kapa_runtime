@@ -92,6 +92,10 @@ def test_request_urls_never_persist(tmp_path):
         for call in (
             lambda: store.record_run("run", {"request_url": "redacted"}),
             lambda: store.record_run("run", {"nested": ["https://invalid.example/path"]}),
+            lambda: store.record_run("run", {"terms_basis":
+                "https://apis.data.go.kr/endpoint?serviceKey=TESTKEY-not-real&LAWD_CD=11110"}),
+            lambda: store.transition_release("release", "draft", {"terms_basis":
+                "https://apis.data.go.kr/endpoint?serviceKey=TESTKEY-not-real"}),
             lambda: store.idempotency_key("sale", {"url": "x"}, "v1", "scope"),
         ):
             with pytest.raises(ValueError):

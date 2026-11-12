@@ -64,6 +64,16 @@ class Spool:
             raise PublishError("Spool digest mismatch")
         return payload
 
+    def put_document(self, document):
+        """Freeze JSON evidence outside the URL-free ledger before recording intent."""
+        payload = json.dumps(document, sort_keys=True, separators=(",", ":"),
+                             ensure_ascii=False, allow_nan=False).encode("utf-8")
+        return self.put(payload)
+
+    def read_document(self, descriptor):
+        """Verify immutable bytes before parsing any resumed evidence."""
+        return json.loads(self.read(descriptor))
+
     def freeze(self, payloads, *, schemas=None):
         return [{"path": relative_path(name), **self.put(payload),
                  "schema": (schemas or {}).get(name, "kapa-runtime-data/2")}

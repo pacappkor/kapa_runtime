@@ -73,6 +73,25 @@ def test_frozen_batch_publication(publication):
     assert len(api.commits) == 4
 
 
+def test_publication_journal_blob_verified(tmp_path):
+    from kapa_runtime.releases.batch import _save, _load
+    with StateStore(tmp_path / 'state.sqlite') as store:
+        store._connection.execute('CREATE TABLE batch_publications '
+                                  '(job_id TEXT PRIMARY KEY,data TEXT,digest TEXT)')
+        document = {'manifest': {'quality': {'terms_basis':
+            'Free redistribution: https://www.data.go.kr/catalog/15126469/openapi.json; reviewed_at=2026-11-10'}}}
+        _save(store, 'job', document)
+        raw = store._connection.execute('SELECT data FROM batch_publications').fetchone()[0]
+        assert 'https://' not in raw
+        assert _load(store, 'job') == document
+        descriptor = json.loads(raw)['document_blob']
+        blob = store.path.parent / 'publication-spool' / descriptor['sha256']
+        payload = blob.read_bytes()
+        blob.write_bytes(b' ' + payload[1:])
+        with pytest.raises(PublishError, match='digest'):
+            _load(store, 'job')
+
+
 def test_spool_corruption(tmp_path):
     spool = Spool(tmp_path / 'spool')
     entries = spool.freeze({'README.md': b'hello'})

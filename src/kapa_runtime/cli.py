@@ -50,10 +50,10 @@ def main(argv=None) -> int:
         reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(prog="kapa-runtime")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("diagnose", "collect", "build", "publish", "activate", "rollback", "query", "attest-legacy", "plan", "collect-batch", "publish-batch"):
+    for name in ("diagnose", "collect", "build", "publish", "activate", "rollback", "query", "attest-legacy", "plan", "collect-batch", "publish-batch", "bootstrap-cumulative"):
         command = commands.add_parser(name)
         command.add_argument("--config", type=Path)
-        if name in ("build", "publish", "activate", "attest-legacy"):
+        if name in ("build", "publish", "activate", "attest-legacy", "bootstrap-cumulative"):
             command.add_argument("--release-id", required=True)
         if name == "collect":
             command.add_argument("--service", required=True, choices=pipeline.SERVICES)
@@ -65,6 +65,9 @@ def main(argv=None) -> int:
             command.add_argument("--dry-run", action="store_true")
         if name in ("activate", "rollback"):
             command.add_argument("--cumulative", action="store_true")
+        if name == "bootstrap-cumulative":
+            command.add_argument("--import-release", action="append", default=[])
+            command.add_argument("--dry-run", action="store_true")
         if name == "publish":
             command.add_argument("--dry-run", action="store_true")
         if name == "query":
@@ -96,6 +99,10 @@ def main(argv=None) -> int:
                 from .releases.batch import publish_batch
                 with redirect_stdout(sys.stderr):
                     output = publish_batch(settings, **args)
+            elif name == "bootstrap-cumulative":
+                from .releases.bootstrap import bootstrap_cumulative
+                with redirect_stdout(sys.stderr):
+                    output = bootstrap_cumulative(settings, **args)
             elif name == "query":
                 controls = {k: args.pop(k) for k in ("release_id", "limit", "cursor")}
                 with redirect_stdout(sys.stderr):
