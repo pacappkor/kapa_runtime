@@ -177,3 +177,129 @@ def test_origin_observation_tamper(legacy):
     with pytest.raises(ValueError, match='reobserve'):
         bootstrap_cumulative(settings, release_id='boot', api=api)
     assert len(api.commits) == 2
+
+@pytest.mark.parametrize('boundary', ['recorded', 'mkdir', 'materialized', 'renamed', 'manifest', 'built'])
+def test_preparation_crash_resume(legacy, monkeypatch, boundary):
+    from pathlib import Path
+    from kapa_runtime.releases import bootstrap as b
+    settings, api = legacy
+    original_prepare = b._prepare_snapshot
+    original_materialize = b.materialize
+    original_rename = Path.rename
+    original_write = b._atomic_write
+    def crash():
+        raise KeyboardInterrupt()
+    def prepare(*args):
+        if boundary == 'recorded':
+            crash()
+        original_prepare(*args)
+        if boundary == 'built':
+            crash()
+    def materialize(m, root, load, **kwargs):
+        if boundary == 'mkdir':
+            root.mkdir(parents=True)
+            (root / 'partial').write_bytes(b'incomplete')
+            crash()
+        result = original_materialize(m, root, load, **kwargs)
+        if boundary == 'materialized':
+            crash()
+        return result
+    def rename(path, target):
+        result = original_rename(path, target)
+        if boundary == 'renamed':
+            crash()
+        return result
+    def write(path, payload):
+        original_write(path, payload)
+        if boundary == 'manifest':
+            crash()
+    with monkeypatch.context() as patch:
+        patch.setattr(b, '_prepare_snapshot', prepare)
+        patch.setattr(b, 'materialize', materialize)
+        patch.setattr(Path, 'rename', rename)
+        patch.setattr(b, '_atomic_write', write)
+        with pytest.raises(KeyboardInterrupt):
+            bootstrap_cumulative(settings, release_id='boot', api=api)
+    with StateStore(settings.state_db) as store:
+        state, raw = store._connection.execute(
+            "SELECT state,data FROM collection_jobs WHERE job_id='boot'").fetchone()
+    data = json.loads(raw)
+    assert state == ('built' if boundary == 'built' else 'preparing')
+    # Simulate an unclean process exit leaving an unrelated partial temp tree.
+    leftover = settings.snapshots_dir / 'bootstrap-preparing-abandoned'
+    leftover.mkdir()
+    (leftover / 'partial').write_bytes(b'untrusted')
+    assert bootstrap_cumulative(settings, release_id='boot', api=api)['state'] == 'published'
+    final = p._read_manifest(settings.manifests_dir / 'boot.json')
+    assert final['created_at'] == data['created_at']
+    assert final['selected_partitions'] == data['manifest']['selected_partitions']
+    assert (leftover / 'partial').read_bytes() == b'untrusted'
+    assert len(api.commits) == 4
+
+
+@pytest.mark.parametrize('state', ['quarantined', 'failed', 'collected', 'validated'])
+@pytest.mark.parametrize('role', ['parent', 'import', 'retry'])
+def test_ineligible_origin_state(legacy, monkeypatch, state, role):
+    from kapa_runtime.releases import bootstrap as b
+    settings, api = legacy
+    if role == 'import':
+        with client() as http:
+            for service in p.SERVICES:
+                p.collect(settings, service=service, lawd_code='11140', deal_ymd='202510',
+                          release_id='r2', client=http)
+        p.build(settings, release_id='r2')
+        p.publish(settings, release_id='r2', api=api)
+        p.activate(settings, release_id='r2', api=api)
+    if role == 'retry':
+        with monkeypatch.context() as patch:
+            def crash(*args):
+                raise KeyboardInterrupt()
+            patch.setattr(b, '_prepare_snapshot', crash)
+            with pytest.raises(KeyboardInterrupt):
+                bootstrap_cumulative(settings, release_id='boot', api=api)
+    with StateStore(settings.state_db) as store:
+        store._connection.execute("UPDATE releases SET state=? WHERE release_id='r1'", (state,))
+    with pytest.raises(ValueError, match='legacy_serving_state_required'):
+        bootstrap_cumulative(settings, release_id='boot',
+                             import_release=['r1'] if role == 'import' else None, api=api)
+
+
+def test_bootstrap_creation_time(legacy):
+    from datetime import datetime, timezone
+    settings, api = legacy
+    parent = p._read_manifest(settings.active_manifest)
+    before = datetime.now(timezone.utc)
+    bootstrap_cumulative(settings, release_id='boot', api=api)
+    after = datetime.now(timezone.utc)
+    manifest = p._read_manifest(settings.manifests_dir / 'boot.json')
+    assert before <= datetime.fromisoformat(manifest['created_at']) <= after
+    assert manifest['created_at'] != parent['created_at']
+    meta = json.loads(p._metadata(settings, 'r1').read_text())
+    assert {v['service_id']: v['fetched_at'] for v in manifest['selected_partitions']} == {
+        service: v['fetched_at'] for service, v in meta['completed'].items()}
+
+
+@pytest.mark.parametrize('start,end,empty', [
+    ('200001', '201201', False), ('200601', '201012', True),
+    ('199001', '200001', True), ('202701', '202801', True)])
+def test_scope_intersects_history(legacy, monkeypatch, start, end, empty):
+    settings, _ = legacy
+    policy = p._policy(settings)
+    policy['accumulation_scope'] = dict(lawd_codes=['11110'], start=start, end=end, batch_cap=1)
+    original = a.plan_day
+    calls = []
+    def capture(*args, **kwargs):
+        calls.append(kwargs)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(a, 'plan_day', capture)
+    with StateStore(settings.state_db) as store:
+        store.migrate_jobs()
+        if empty:
+            with pytest.raises(ValueError, match='accumulation_scope_empty_service_range'):
+                a._plan(settings, store, {'selected_partitions': []}, policy, lambda: NOW)
+            assert not calls
+        else:
+            daily, _, _ = a._plan(settings, store, {'selected_partitions': []}, policy, lambda: NOW)
+            assert calls[0]['sale'] == ServiceRange('200601', '201201')
+            assert calls[0]['rent'] == ServiceRange('201101', '201201')
+            assert all('201101' <= item.deal_ymd <= '201201' for item in daily.items)

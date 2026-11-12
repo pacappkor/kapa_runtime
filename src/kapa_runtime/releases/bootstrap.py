@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 import tempfile
 from pathlib import Path
 
@@ -20,6 +20,9 @@ from .snapshot import check_parent, materialize, published_digest
 def legacy_partitions(settings, store, release_id):
     """Bind local replay evidence to the published inventory and original ledger."""
     p._id(release_id)
+    row = store.get_release(release_id)
+    p._require(row is None or row['state'] in ('published', 'active'),
+               'legacy_serving_state_required')
     try:
         published_digest(store, release_id)
     except ValueError:
@@ -84,21 +87,57 @@ def verify_imports(settings, store, manifest, imports):
     p._require(sorted(expected, key=key) == manifest['selected_partitions'], 'bootstrap_evidence_changed')
 
 
+def _prepare_snapshot(settings, store, release_id, data):
+    """Resume frozen preparation; abandoned random temp directories are never reused.
+
+    Interrupted temp directories may be removed by an operator with writers stopped.
+    Only a verified, atomically renamed directory becomes the snapshot.
+    """
+    m = validate_manifest(data['manifest'])
+    p._require(manifest_digest(m) == data['snapshot_digest']
+               and a.digest(dict(manifest=m, card=data['card'], imports=data['imports']))
+               == data['inputs_digest'], 'bootstrap_inputs_changed')
+    check_parent(store, m['parent_snapshot'], active_path=settings.active_manifest)
+    verify_imports(settings, store, m, data['imports'])
+    root = settings.snapshots_dir / release_id
+    p._safe_path(root)
+    if root.exists():
+        p._verify_local(root, m)
+    else:
+        settings.snapshots_dir.mkdir(parents=True, exist_ok=True)
+        # Unique attempts safely ignore crash leftovers, including partial bytes.
+        with tempfile.TemporaryDirectory(dir=settings.snapshots_dir,
+                                         prefix='bootstrap-preparing-') as directory:
+            temporary = Path(directory) / release_id
+            sources = {entry['path']: settings.snapshots_dir / part['producer_release_id']
+                       for part in m['selected_partitions'] for entry in part['files']}
+            def load(name):
+                return data['card'].encode() if name == 'README.md' else a._load(sources[name], name)
+            materialize(m, temporary, load, enabled=True)
+            temporary.rename(root)
+    _atomic_write(settings.manifests_dir / (release_id + '.json'), dumps_manifest(m).encode())
+    store._connection.execute("UPDATE collection_jobs SET state='built' WHERE job_id=?", (release_id,))
+
+
 def bootstrap_cumulative(settings, *, release_id, import_release=None, dry_run=False, api=None):
     from .batch import publish_batch
+    invoked_at = datetime.now(timezone.utc)
     p._id(release_id)
     imports = sorted(set(import_release or []))
     for rid in imports:
         p._id(rid)
     with StateStore(settings.state_db) as store:
         store.migrate_jobs()
-        existing = store._connection.execute('SELECT data FROM collection_jobs WHERE job_id=?',
+        existing = store._connection.execute('SELECT data,state FROM collection_jobs WHERE job_id=?',
                                             (release_id,)).fetchone()
         if existing:
             data = json.loads(existing[0])
             p._require(data.get('kind') == 'bootstrap' and data['explicit_imports'] == imports,
                        'bootstrap_job_conflict')
             prepared = None
+            if existing[1] == 'preparing':
+                p._require(not dry_run, 'bootstrap_preparation_resume_required')
+                _prepare_snapshot(settings, store, release_id, data)
         else:
             parent = p._read_manifest(settings.active_manifest)
             p._require(parent['schema_version'] == 'kapa-runtime-release/1', 'legacy_active_required')
@@ -108,7 +147,7 @@ def bootstrap_cumulative(settings, *, release_id, import_release=None, dry_run=F
                          active_path=settings.active_manifest)
             p._require(store.get_release(parent['release_id'])['state'] == 'active', 'legacy_active_required')
             p._require(not store._connection.execute(
-                "SELECT 1 FROM collection_jobs WHERE state IN ('running','paused','built','blocked')").fetchone(),
+                "SELECT 1 FROM collection_jobs WHERE state IN ('preparing','running','paused','built','blocked')").fetchone(),
                 'resume_existing_job_required')
             a._new_job_id(settings, store, parent, release_id)
             origins = sorted(set([parent['release_id'], *imports]))
@@ -132,7 +171,7 @@ def bootstrap_cumulative(settings, *, release_id, import_release=None, dry_run=F
                        policy['fixture_evidence'].get('github_revision') == sha, 'build_evidence_required')
             siblings, warnings = p.workspace_guard.capture(settings)
             m = build_manifest(release_id=release_id, state='validated', files=[],
-                created_at=parent['created_at'], parser_version=parent['parser_version'],
+                created_at=invoked_at, parser_version=parent['parser_version'],
                 source_runs=sorted({part['run_id'] for part in parts}),
                 github_revisions={'pacappkor/kapa_runtime': sha, **siblings},
                 quality=dict(passed=True, legal_verified=False, fixture_revision=sha,
@@ -159,14 +198,16 @@ def bootstrap_cumulative(settings, *, release_id, import_release=None, dry_run=F
                 settings.cache_dir.mkdir(parents=True, exist_ok=True)
                 temporary = tempfile.TemporaryDirectory(dir=settings.cache_dir, prefix='bootstrap-preview-')
                 root = Path(temporary.name) / release_id
+                materialize(m, root, load, enabled=True)
+                prepared = (m, root, data)
             else:
-                root = settings.snapshots_dir / release_id
-            materialize(m, root, load, enabled=True)
-            prepared = (m, root, data)
-            if not dry_run:
-                _atomic_write(settings.manifests_dir / (release_id + '.json'), dumps_manifest(m).encode())
+                data.update(manifest=m, card=card.decode(), created_at=m['created_at'])
+                data['inputs_digest'] = a.digest(dict(manifest=m, card=data['card'], imports=origins))
+                # SQLite autocommit makes the frozen intent durable before any mkdir.
                 store._connection.execute('INSERT INTO collection_jobs VALUES (?,?,?)',
-                                          (release_id, 'built', _dump(data)))
+                                          (release_id, 'preparing', _dump(data)))
+                _prepare_snapshot(settings, store, release_id, data)
+                prepared = None
     try:
         result = publish_batch(settings, job_id=release_id, dry_run=dry_run, api=api,
                                _preview=prepared if dry_run else None)

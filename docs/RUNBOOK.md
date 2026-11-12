@@ -577,12 +577,23 @@ backup instructions. No job, snapshot selection or remote commit is created;
 cache and schema initialization may remain. Real publication reuses the frozen
 step-4 spool and stage → verify → public promotion → verify path. Resume the same
 release ID after interruption; do not bypass journals with a new ID.
+Preparation first persists a `preparing` job with frozen inputs/digest and the new
+release's invocation timestamp. It materializes into a unique temporary directory,
+atomically renames the verified snapshot, then marks the job `built`. Same-ID
+retries verify an installed snapshot or rebuild from the frozen inputs. Abandoned
+`snapshots/bootstrap-preparing-*` temporary directories are never read or reused;
+with all writers stopped, operators may remove these leftovers. A dry-run of a
+`preparing` job refuses with `bootstrap_preparation_resume_required`; resume the
+real command instead. Original partition `fetched_at` timestamps are preserved.
 
 Optional imports use repeatable `--import-release older-release-id` on both preview
 and real commands. Every origin needs a ledger digest, complete two-service
 metadata, original ledger observations, raw hash/replay and verified local snapshot.
 Conflicting pairs/paths refuse. HF file presence never extends coverage. Imports
-are bounded to 60 pairs and the normal manifest/publication limits.
+are bounded to 60 pairs and the normal manifest/publication limits. Every origin,
+including the parent, must currently be `published` or `active` in the ledger;
+`legacy_serving_state_required` refuses quarantined, failed or other ineligible
+states even when historical publication evidence remains.
 
 ### Smoke gate and bounded collection
 
@@ -602,7 +613,11 @@ are bounded to 60 pairs and the normal manifest/publication limits.
    ```
 
    Scope validates codes after city-aggregate exclusion and preserves both services,
-   cadence and quotas. Policy is digest-bound: finish/resume jobs before changing it.
+   cadence and quotas. Scope intersects, never expands, sale history from `200601`
+   and rent history from `201101`, each ending at the current Seoul month. An empty
+   service intersection refuses with `accumulation_scope_empty_service_range`,
+   without creating work or claiming zero coverage.
+   Policy is digest-bound: finish/resume jobs before changing it.
    Omission restores nationwide planning; do not remove it during initial rollout.
 
    ```sh

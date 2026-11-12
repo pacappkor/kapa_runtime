@@ -131,7 +131,11 @@ def _plan(settings, store, resolved, policy, clock):
             raise p.PipelineError("invalid_accumulation_scope") from None
         codes = [v for v in codes if v["code"] in selected]
         budget = replace(budget, batch_cap=scope["batch_cap"])
-        ranges = {service: ServiceRange(scope["start"], scope["end"]) for service in ("sale", "rent")}
+        for service, history_start in (("sale", "200601"), ("rent", "201101")):
+            start = max(scope["start"], history_start)
+            end = min(scope["end"], day[:7].replace("-", ""))
+            p._require(start <= end, "accumulation_scope_empty_service_range")
+            ranges[service] = ServiceRange(start, end)
     coverage = _coverage(resolved, store)
     plan = plan_day(codes, today=datetime.fromisoformat(day).date(), coverage=coverage, budget=budget, **ranges)
     if not plan.items and budget.pair_capacity == 0:
@@ -414,7 +418,7 @@ def collect_batch(settings, *, job_id=None, dry_run=False, client=None,
             _new_job_id(settings, store, parent, job)
             _preflight(parent, resolved, [asdict(item) for item in daily.items], policy)
             # Do not strand a completed unpublished batch by starting another job.
-            p._require(not con.execute("SELECT 1 FROM collection_jobs WHERE state IN ('running','paused','built')").fetchone(),
+            p._require(not con.execute("SELECT 1 FROM collection_jobs WHERE state IN ('preparing','running','paused','built')").fetchone(),
                        "resume_existing_job_required")
             data = {**binding, "plan": asdict(daily), "plan_digest": digest(asdict(daily)),
                     "requests_per_attempt": {s: policy["services"][s]["max_requests"] for s in SERVICES}}
