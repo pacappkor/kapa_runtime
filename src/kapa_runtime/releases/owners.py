@@ -33,7 +33,7 @@ def _windows_ids(sid) -> frozenset[str]:
 
 def owner_ids(path: Path) -> frozenset[str]:
     if os.name != "nt":
-        return frozenset({str(path.stat().st_uid)})
+        return frozenset({"uid:" + str(path.stat().st_uid)})
     import ctypes
     from ctypes import wintypes
 
@@ -55,7 +55,7 @@ def owner_ids(path: Path) -> frozenset[str]:
 
 def current_owner_ids() -> frozenset[str]:
     if os.name != "nt":
-        return frozenset({str(os.geteuid())})
+        return frozenset({"uid:" + str(os.geteuid())})
     return _windows_current_owner_ids()
 
 
