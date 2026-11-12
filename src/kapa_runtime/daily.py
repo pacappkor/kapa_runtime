@@ -11,9 +11,11 @@ from .storage.parquet import _safe_path
 
 
 def clear_stop(settings):
-    path = settings.data_root / 'daily' / 'STOP'
-    _safe_path(path)
-    path.unlink(missing_ok=True)
+    from .state_bundle import exclusive
+    with exclusive(settings):
+        path = settings.data_root / 'daily' / 'STOP'
+        _safe_path(path)
+        path.unlink(missing_ok=True)
     return {'state': 'cleared', 'warning': 'pending_job_and_ledger_blocks_unchanged'}
 
 

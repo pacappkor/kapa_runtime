@@ -122,8 +122,6 @@ def _reconstruct(settings, api):
             manifest = p._read_manifest(path)
             rid = manifest['release_id']
             target = settings.snapshots_dir / rid
-            if target.exists():
-                continue
             row = store.get_release(rid)
             if row and row['state'] in ('published', 'active'):
                 manifest = p._trusted_published_manifest(settings, store, rid, path=path)
@@ -134,7 +132,9 @@ def _reconstruct(settings, api):
                         revision=ref['commit_sha'], cache_dir=settings.cache_dir / rid,
                         token=publisher._read_token)
                 # Older v1 snapshots are supported by materialize as well.
-                materialize(manifest, target, load, enabled=True)
+                if not target.exists():
+                    materialize(manifest, target, load, enabled=True)
+                p._verify_local(target, manifest)
         # Frozen pending snapshots need generated metadata plus immutable observations.
         for row in store._connection.execute("SELECT job_id,data FROM collection_jobs WHERE state='built'"):
             rid, data = row[0], json.loads(row[1])
