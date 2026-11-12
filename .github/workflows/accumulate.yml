@@ -1,0 +1,90 @@
+# SPDX-License-Identifier: GPL-3.0-only
+name: Daily accumulation
+on:
+  schedule:
+    - cron: '40 17 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: accumulate
+  cancel-in-progress: false
+jobs:
+  test:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: '0.11.14'
+          enable-cache: false
+      - run: uv sync --locked --extra test
+      - run: uv run --locked --extra test python -I -B -m pytest -p no:cacheprovider -q
+        env:
+          UV_OFFLINE: '1'
+  collect:
+    if: github.ref == 'refs/heads/main'
+    needs: test
+    environment: collector
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: runtime
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: runtime
+          persist-credentials: false
+      - name: Read committed sibling pins
+        id: pins
+        run: |
+          python -I -c 'import json,os; p=json.load(open("tools/collector-pins.json")); f=open(os.environ["GITHUB_OUTPUT"],"a"); [f.write(k+"="+p[k]+"\n") for k in ("kapa_knowledge","kapa_skills")]'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: pacappkor/kapa_knowledge
+          ref: ${{ steps.pins.outputs.kapa_knowledge }}
+          path: kapa_knowledge
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: pacappkor/kapa_skills
+          ref: ${{ steps.pins.outputs.kapa_skills }}
+          path: kapa_skills
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: '0.11.14'
+          enable-cache: false
+      - run: uv sync --locked
+      - name: Generate runner config
+        run: python -I tools/collector_config.py
+        env:
+          KAPA_STATE_REPO: ${{ vars.KAPA_STATE_REPO }}
+      - name: Pull private state
+        id: pull
+        run: uv run --locked kapa-runtime state pull --config "$RUNNER_TEMP/runtime.json"
+        env:
+          KAPA_HF_TOKEN: ${{ secrets.KAPA_HF_TOKEN }}
+          KAPA_DATA_GO_KR_KEY: ${{ secrets.KAPA_DATA_GO_KR_KEY }}
+      - name: Collect publish activate and query
+        run: uv run --locked kapa-runtime daily-run --config "$RUNNER_TEMP/runtime.json" --fixture-revision "$GITHUB_SHA"
+        env:
+          KAPA_HF_TOKEN: ${{ secrets.KAPA_HF_TOKEN }}
+          KAPA_DATA_GO_KR_KEY: ${{ secrets.KAPA_DATA_GO_KR_KEY }}
+      - name: Save continuation including STOP after failure
+        if: always() && steps.pull.outcome == 'success'
+        run: uv run --locked kapa-runtime state push --config "$RUNNER_TEMP/runtime.json"
+        env:
+          KAPA_HF_TOKEN: ${{ secrets.KAPA_HF_TOKEN }}
+          KAPA_DATA_GO_KR_KEY: ${{ secrets.KAPA_DATA_GO_KR_KEY }}
