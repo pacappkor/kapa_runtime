@@ -60,11 +60,16 @@ class WrittenFile:
 
 def _safe_path(path: Path) -> None:
     """Refuse links, including Windows junction/reparse point ancestors."""
+    import stat
     for part in (path, *path.parents):
-        if part.is_symlink() or (part.exists() and getattr(part, "is_junction", lambda: False)()):
+        if part.is_symlink():
             raise ValueError("linked storage paths are forbidden")
-        if part.exists() and getattr(part.stat(), "st_file_attributes", 0) & 0x400:
-            raise ValueError("reparse storage paths are forbidden")
+        try:
+            info = part.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise ValueError("linked or reparse storage paths are forbidden")
 
 
 def _row(record: TransactionRecord) -> dict:
@@ -141,17 +146,26 @@ def read_partition(path, *, schema_version=SCHEMA_VERSION) -> list[TransactionRe
         raise ValueError("unsupported parquet schema_version")
     if not table.schema.equals(expected, check_metadata=True):
         raise ValueError("unexpected parquet schema")
+    return list(decode_records(table))
+
+
+def decode_record(row) -> TransactionRecord:
+    """Decode and validate one physical Parquet/DuckDB row."""
+    row = dict(row)
+    for name in _TIME_FIELDS:
+        row[name] = row[name].replace(tzinfo=timezone.utc)
+    row["extra"] = json.loads(row["extra"])
+    row["match_status"] = MatchStatus(row["match_status"])
+    return TransactionRecord(**row)
+
+
+def decode_records(table):
+    """Yield validated records from a table or bounded record batch."""
     # Windows may have no IANA tzdata installed. UTC is unambiguous; decode
     # physical timestamps without consulting a machine timezone database.
     decoded = table
     for name in _TIME_FIELDS:
         index = decoded.schema.get_field_index(name)
         decoded = decoded.set_column(index, name, decoded.column(name).cast(pa.timestamp("us")))
-    records = []
     for row in decoded.to_pylist():
-        for name in _TIME_FIELDS:
-            row[name] = row[name].replace(tzinfo=timezone.utc)
-        row["extra"] = json.loads(row["extra"])
-        row["match_status"] = MatchStatus(row["match_status"])
-        records.append(TransactionRecord(**row))
-    return records
+        yield decode_record(row)

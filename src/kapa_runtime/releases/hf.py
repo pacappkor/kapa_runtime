@@ -259,11 +259,15 @@ class _VerifiedPromotion:
 
 
 def _verified_promotion(repo_id, staging, report, manifest, payloads):
+    from .manifest_v2 import resolve_snapshot_inventory
+    selected = resolve_snapshot_inventory(manifest, payloads.__getitem__)
+    selected += [dict(path=r['path'], sha256=r['sha256'], rows=0)
+                 for r in manifest.get('coverage_shards', [])]
     if (not staging.expected_private or not report.passed
             or report.manifest_sha256 != manifest_digest(manifest)
             or set(report.revisions) != {(r["repo_id"], r["commit_sha"]) for r in manifest["hugging_face_revisions"]}
             or any(repo != staging.repo_id for repo, _ in report.revisions)
-            or set(report.checked_files) != {f["path"] for f in manifest["files"]}
+            or set(report.checked_files) != {f["path"] for f in selected}
             or {name: digest for name, digest, _ in report.verified_inventory} != {
                 name: hashlib.sha256(value).hexdigest() for name, value in payloads.items()}
             or not {f["path"] for f in manifest["files"]} <= set(payloads)
@@ -487,7 +491,8 @@ class _HubWriter:
         return self._replace_files(payloads, preserve_attributes=False, expected_parent=parent)
 
     def _replace_files(self, payloads: dict[str, bytes], *, preserve_attributes=True,
-                      evidence_store=None, cache_dir=None, expected_parent=None, _promotion=None, payload_versions=None) -> str:
+                      evidence_store=None, cache_dir=None, expected_parent=None, _promotion=None, payload_versions=None,
+                      delta=False, tombstones=(), before_commit=None) -> str:
         """Replace the enumerated tree, refusing concurrent default-branch changes."""
         payloads = dict(payloads)
         if not self.expected_private and self._restoration is None:
@@ -523,12 +528,49 @@ class _HubWriter:
                       if name not in payloads and not (preserve_attributes and name == ".gitattributes")]
         operations.extend(CommitOperationAdd(path_in_repo=name, path_or_fileobj=payload)
                           for name, payload in sorted(payloads.items()))
+        if delta:
+            operations, _ = self._delta_plan(payloads, parent, cache_dir, tombstones)
         self._private()
+        if before_commit is not None:
+            before_commit()
+        if delta:
+            self._require_head(parent)
         result = self.api.create_commit(self.repo_id, operations=operations, repo_type="dataset",
             token=self._token, parent_commit=parent, commit_message="Replace verified release inventory")
         if not isinstance(result.oid, str) or not SHA.fullmatch(result.oid):
             raise PublishError("Hub did not return a full commit SHA")
         return result.oid
+
+    def _delta_plan(self, payloads, parent, cache_dir, tombstones=()):
+        self._require_head(parent)
+        revision, remote = self._head_tree()
+        if revision != parent:
+            raise PublishError("Default-branch head changed")
+        removed = set(remote) - set(payloads)
+        if not removed <= set(tombstones):
+            raise PublishError("Unowned remote path; explicit tombstone required")
+        if set(tombstones) & set(payloads):
+            raise PublishError("Tombstone resurrection refused")
+        operations = []
+        changed_bytes = 0
+        for name, payload in sorted(payloads.items()):
+            self._scan_path(name)
+            scan_secret_payload(payload, name, self.secret_values())
+            if name in remote:
+                previous = download_bytes(self.api, self.repo_id, name, revision=parent,
+                                          cache_dir=cache_dir, token=self._read_token)
+                if previous == payload:
+                    continue
+                if name.startswith('data/observations/'):
+                    raise PublishError("Immutable path conflict")
+            changed_bytes += len(payload)
+            operations.append(CommitOperationAdd(path_in_repo=name, path_or_fileobj=payload))
+        for name in sorted(removed):
+            self._scan_path(name)
+            operations.append(CommitOperationDelete(path_in_repo=name))
+        if changed_bytes > 512 * 1024 * 1024 or len(operations) > 500:
+            raise PublishError("Batch commit cap exceeded")
+        return operations, dict(bytes=changed_bytes, ops=len(operations), files=len(payloads))
 
     def _verify_inventory(self, sha, payloads, cache_dir):
         self._private()
@@ -561,11 +603,20 @@ class _HubWriter:
             self._private()
         except Exception:
             return VerificationReport(manifest_digest(m), (), (), ("privacy_check_failed",))
+        from .manifest_v2 import resolve_snapshot_inventory
+        try:
+            selected = resolve_snapshot_inventory(m, lambda name: download_bytes(
+                self.api, self.repo_id, name, revision=commit_sha, cache_dir=cache_dir,
+                token=self._read_token))
+            selected = selected + [dict(path=r['path'], sha256=r['sha256'], rows=0)
+                                   for r in m.get('coverage_shards', [])]
+        except Exception:
+            return VerificationReport(manifest_digest(m), (), (), ('snapshot_resolution_failed',))
         retained = {}
         remote = []
         tree_enumerated = False
         try:
-            current_paths = {entry["path"] for entry in m["files"]}
+            current_paths = {entry["path"] for entry in selected}
             # Paths alone are not evidence: require complete trusted file entries.
             for entry in previous_files:
                 if (not isinstance(entry, dict) or set(entry) not in ({"path", "sha256", "rows"}, {"path", "sha256", "rows", "data_schema_version"})
@@ -632,7 +683,7 @@ class _HubWriter:
                     inventory[name] = (digest, retained[name][0].get("data_schema_version", "kapa-runtime-data/2"))
             except Exception:
                 errors.append("retained_file_verification_failed")
-        for entry in m["files"]:
+        for entry in selected:
             try:
                 payload = download_bytes(self.api, self.repo_id, entry["path"],
                                                      revision=commit_sha, cache_dir=cache_dir,

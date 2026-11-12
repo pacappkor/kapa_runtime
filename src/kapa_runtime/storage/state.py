@@ -110,7 +110,7 @@ class StateStore:
     def _migrate(self):
         con = self._connection
         version = con.execute("PRAGMA user_version").fetchone()[0]
-        if version > 2:
+        if version > 4:
             raise ValueError("unsupported state schema version")
         if version == 0:
             con.executescript("""
@@ -134,6 +134,87 @@ class StateStore:
                 PRAGMA user_version=2;
                 COMMIT;
             """)
+
+    def _migrate_snapshots(self):
+        """Opt-in v3 migration; unchanged v1 callers keep their v2 ledger."""
+        con = self._connection
+        if con.execute('PRAGMA user_version').fetchone()[0] == 2:
+            con.executescript("""
+                BEGIN IMMEDIATE;
+                CREATE TABLE snapshot_parents (release_id TEXT PRIMARY KEY,
+                    parent_release_id TEXT NOT NULL, parent_digest TEXT NOT NULL);
+                CREATE TABLE batch_members (release_id TEXT NOT NULL,
+                    lawd_code TEXT NOT NULL, deal_ymd TEXT NOT NULL,
+                    PRIMARY KEY (release_id, lawd_code, deal_ymd));
+                CREATE TABLE partition_selections (release_id TEXT NOT NULL,
+                    service_id TEXT NOT NULL, lawd_code TEXT NOT NULL,
+                    deal_ymd TEXT NOT NULL, evidence TEXT NOT NULL,
+                    PRIMARY KEY (release_id, service_id, lawd_code, deal_ymd));
+                PRAGMA user_version=3;
+                COMMIT;
+            """)
+
+    def migrate_jobs(self):
+        """Opt-in v4; a single StateStore lock also owns the job executor."""
+        self._migrate_snapshots()
+        if self._connection.execute("PRAGMA user_version").fetchone()[0] == 3:
+            self._connection.executescript("""
+                BEGIN IMMEDIATE;
+                CREATE TABLE collection_jobs (job_id TEXT PRIMARY KEY,
+                    state TEXT NOT NULL, data TEXT NOT NULL);
+                CREATE TABLE work_items (job_id TEXT NOT NULL REFERENCES collection_jobs(job_id),
+                    lawd_code TEXT NOT NULL, deal_ymd TEXT NOT NULL, state TEXT NOT NULL,
+                    PRIMARY KEY(job_id, lawd_code, deal_ymd));
+                CREATE TABLE attempts (attempt_id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL, lawd_code TEXT NOT NULL, deal_ymd TEXT NOT NULL,
+                    service_id TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(run_id),
+                    observation_id TEXT REFERENCES observations(observation_id),
+                    state TEXT NOT NULL, data TEXT NOT NULL,
+                    FOREIGN KEY(job_id, lawd_code, deal_ymd)
+                        REFERENCES work_items(job_id, lawd_code, deal_ymd));
+                PRAGMA user_version=4;
+                COMMIT;
+            """)
+
+    def record_snapshot(self, manifest, loader=None):
+        from ..releases.manifest import validate_manifest
+        from ..releases.manifest_v2 import resolve_snapshot
+        m = validate_manifest(manifest)
+        if m['schema_version'] != 'kapa-runtime-release/2':
+            raise ValueError('v2 snapshot required')
+        m = resolve_snapshot(m, loader)
+        self._migrate_snapshots()
+        con = self._connection
+        existing = con.execute('SELECT parent_release_id,parent_digest FROM snapshot_parents WHERE release_id=?',
+                               (m['release_id'],)).fetchone()
+        if existing is not None:
+            parent = m['parent_snapshot']
+            members = [dict(row) for row in con.execute(
+                'SELECT lawd_code,deal_ymd FROM batch_members WHERE release_id=? ORDER BY lawd_code,deal_ymd',
+                (m['release_id'],))]
+            partitions = [json.loads(row[0]) for row in con.execute(
+                'SELECT evidence FROM partition_selections WHERE release_id=? ORDER BY lawd_code,deal_ymd,service_id',
+                (m['release_id'],))]
+            if (tuple(existing) != (parent['release_id'], parent['digest'])
+                    or members != m['batch_scope']['declared_pairs']
+                    or partitions != m['selected_partitions']):
+                raise ValueError('snapshot evidence conflict')
+            return
+        con.execute('BEGIN IMMEDIATE')
+        try:
+            parent = m['parent_snapshot']
+            con.execute('INSERT INTO snapshot_parents VALUES (?,?,?)',
+                        (m['release_id'], parent['release_id'], parent['digest']))
+            for p in m['batch_scope']['declared_pairs']:
+                con.execute('INSERT INTO batch_members VALUES (?,?,?)',
+                            (m['release_id'], p['lawd_code'], p['deal_ymd']))
+            for p in m['selected_partitions']:
+                con.execute('INSERT INTO partition_selections VALUES (?,?,?,?,?)',
+                            (m['release_id'], p['service_id'], p['lawd_code'], p['deal_ymd'], _dump(p)))
+            con.execute('COMMIT')
+        except BaseException:
+            con.execute('ROLLBACK')
+            raise
 
     def repository_evidence(self, repo_id):
         row = self._connection.execute("SELECT data FROM repository_evidence WHERE repo_id=?", (repo_id,)).fetchone()
@@ -171,6 +252,13 @@ class StateStore:
         parent = evidence.get("public_commit_sha")
         if not isinstance(parent, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", parent):
             raise ValueError("restoration journal expected head required")
+        if 'restore_inventory' in evidence:
+            from ..releases.spool import Spool, inventory_digest
+            entries = evidence['restore_inventory']
+            if inventory_digest(entries) != evidence['restore_digest']:
+                raise ValueError('restoration inventory digest mismatch')
+            spool = Spool(self.path.parent / 'publication-spool')
+            return {entry['path']: spool.read(entry) for entry in entries}, parent
         return {name: bytes.fromhex(value) for name, value in evidence["restore_payloads"].items()}, parent
 
     def _restoration_authority(self, release_id, repo_id):

@@ -5,6 +5,14 @@
 
 관리자는 GitHub private vulnerability reporting을 활성화하고 [SECURITY.md](../SECURITY.md)의 비공개 신고 경로를 확인한다. `.github/workflows/traffic.yml`은 조직 템플릿을 그대로 사용하며 기본 브랜치 `main`에 반영된 뒤 매일 실행된다. 조직 reusable workflow는 `main`을 별도 `traffic` 집계 브랜치에 동기화하고 방문·clone 집계를 기록한다. 관리자는 해당 저장소에 필요한 권한의 `TRAFFIC_TOKEN` Actions secret을 제공해야 한다. 토큰 값은 코드·문서·로그에 넣지 않는다. README 배지는 첫 집계 전에는 표시되지 않을 수 있다. 코드 변경만으로 이 GitHub 설정이나 실제 가시성이 바뀌지는 않는다.
 
+## 누적 snapshot 개발 API (2단계)
+
+기본 v1 CLI 경로는 유지한다. `releases.snapshot.build_snapshot(..., enabled=True)`만 누적 조립을 허용하며 StateStore writer lock 안에서 ACTIVE parent digest와 published-but-not-active/journal 차단을 확인한다. 게시 어댑터는 커밋 직전에 `check_parent`를 다시 호출해야 한다. 현재 v1 publish CLI에 v2를 전달하지 않는다. v2 publication orchestration/final envelope는 아직 통합하지 않았다.
+
+`assemble_snapshot`의 trusted digest map은 사용자 manifest의 자기 주장 대신 장부 published digest에서만 구성한다. legacy bootstrap 순수 API는 검증된 partition evidence를 명시적으로 요구한다. `write_once`는 관측 경로 충돌을 거부하며 실패한 부분 파일은 자동 덮어쓰지 않는다. `materialize(..., enabled=True)`는 선택 inventory를 새 디렉터리에 설치하고 검증한다. 실패 디렉터리는 자동 재사용하지 않고 운영자가 원인을 조사한다.
+
+신뢰된 v2 published manifest에 대해 Python `pipeline.activate/rollback(..., cumulative=True)`는 전체 선택 inventory, 고정 remote SHA, 현재 head 제공, workspace pin과 tombstone을 확인한 뒤 기존 atomic pointer 교체를 사용한다. 새 snapshot이 기존 파일을 선택 해제해도 archive 삭제가 아니다. 복구 가능한 동일 digest 사본이 없으면 observation 보존을 포기하지 않고 중지한다. SQLite schema 3은 parent, batch members, partition evidence만 추가한다. scheduler/jobs/quota, HF delta/spool, query와 bootstrap 명령은 후속 단계다.
+
 ## 사전 조건
 
 Python 3.12와 `uv sync --locked --extra test`가 필요하다. 실제 호출은 운영자만 수행한다. Git 작업 트리가 깨끗한 커밋에서 테스트한 뒤 build한다. 자격증명은 설정의 상대 경로 또는 환경변수로 제공하고 출력·커밋하지 않는다. **HF 기본값은 private이다. 사용자 정책(2026-11-10)에 따라 market 역할만 명시적 public 설정이 가능하다.** GitHub 코드는 공개 대상이며 운영 데이터·자격증명은 저장소 밖의 로컬 `data_root` 및 자격증명 경로에 둔다. HF `pacappkor/kapa-market-data`는 public, `pacappkor/kapa-market-data-staging`은 private 검증용이다(2026-11-11 정책). knowledge-index, evals, property, matters는 private을 유지하고 raw·로그는 업로드하지 않는다. 실제 가시성과 설정이 다르면 어느 방향으로도 자동 변경하지 않고 거부한다.
@@ -28,6 +36,16 @@ Python 3.12와 `uv sync --locked --extra test`가 필요하다. 실제 호출은
 market을 공개하려면 위 visibility만 `public`으로 명시한다. 문자열 형식 `"market": "kapa-market"`은 기존 호환 private 설정이다. 다른 역할의 public 설정은 오류다. public 업로드 직전에도 모든 서비스의 `terms_reviewed=true`와 `terms_basis`를 다시 확인한다. 확인된 시장 자료 이용조건은 `이용허락범위 제한 없음`으로 기록하되 출처·검토일도 남긴다.
 
 `examples/operator-policy.example.json`을 data_root의 `operator-policy.json`으로 복사한다. 실제 서비스 승인·잔여 호출 예산을 확인하여 서비스별 `max_requests`를 설정한다(3~150, 재시도를 포함해 페이지당 3회 예약, 최대 페이지 수는 floor(max_requests/3)). 일일 한도는 data.go.kr API별 10,000회, VWorld 40,000회라는 사용자 보고(`user-reported-2026-11-10`)이며 제공기관 검증은 아니다. VWorld 수집은 미구현이다. P0 호출은 Asia/Seoul 달력일·서비스별로 전체 max_requests를 SQLite에 보수적으로 예약하고 초과하면 거부한다. 각 실제 페이지·재시도 요청 직전 날짜를 다시 확인하고 자정을 넘으면 새 날짜에도 전체 run 예산을 보수적으로 예약한다. 새 날짜 잔액 부족 시 요청 전에 중단한다. 실패·미사용분도 환급하지 않으며 다른 프로그램이 소비한 한도는 별도 확인한다. `quota=null`을 확인 완료로 간주하지 않는다. 외부 저장·재배포 이용조건을 검토한 뒤에만 `terms_reviewed=true`로 바꾸고 `terms_basis`에 이용조건, 출처 URL, reviewed_at을 기록한다. 이는 법적 검증을 의미하지 않으며 manifest의 legal_verified는 항상 false다. 테스트 성공 후 `fixture_evidence.github_revision`에 해당 깨끗한 전체 HEAD SHA, `passed=true`를 기록한다. 근거가 없으면 build는 중단된다.
+
+## 수집 계획(3a)
+
+`planning.plan_day()`는 I/O·DB 없는 계획 함수이며 수집/예약/CLI 실행 기능은 아니다. 입력은 LAWD 목록, Asia/Seoul 오늘 날짜(aware datetime도 허용), 완전 sale+rent 관측 pair → observed_at 날짜 매핑이다. 정상 zero도 완전 관측이다. 서비스 범위의 교집합만 계획한다. sale 200601 / rent 201101은 잠정 기본값이며 실제 제공 범위 검증 전 확정하지 않는다.
+
+서비스별 9,000 requests, pair당 서비스별 150 requests(페이지당 3회), 공동 이론 상한 60 pairs와 batch cap 60을 함께 적용한다. refresh 20%(12 pairs), audit 5%(3 pairs)를 먼저 예약하고 잔여를 backfill에 쓴다(기본 75%, 미사용 share·정수 잔여 이관). 작은 batch cap은 share를 각각 제한하며 refresh가 먼저 사용한다. `refresh_sla_shortfall`은 due backlog 중 refresh share로 처리하지 못한 수다. 이미 쓴/예약한 예산은 호출자가 서비스별 입력에서 차감해야 한다. 이 함수 자체는 원자적 quota 예약·자정 전환·byte cap을 보장하지 않는다.
+
+순서는 refresh → audit → backfill이다. 현재월은 매일, 직전 1~3개월은 관측 후 7일, 직전 4~12개월은 관측일의 다음 달 같은 날(월말 clamp)에 due다. due는 오늘 기준 window에서 재평가한다. refresh 안에서는 최신 월부터이며 각 월은 미관측 지역, 가장 오래된 관측일, 코드 오름차순으로 선택한다. audit은 12개월보다 오래된 관측 pair를 관측일 오름차순(동률은 최신월·코드)으로 선택하며 오늘 관측한 pair는 제외한다. 성공한 완전 관측일을 다음 호출의 coverage에 반영해야 순환이 진행된다. 실패·동일 입력 재계획은 cursor를 전진시키지 않으며 예산이 달라도 미처리 지역/pair가 우선된다. 기본 현재월 269지역 / 일 12 refresh slots = 약 22.42일, 올림 23일에 전체 1회 순환한다(매일 해당 slots의 관측 성공·coverage 반영 및 같은 현재월 유지 조건). 따라서 현재월 daily는 목표 cadence이지 전국 daily SLA 보장이 아니며, 현재월 backlog가 share를 채우는 동안 이전 월 refresh는 지연될 수 있다. backfill은 서울 전체 공통 기간을 먼저 채운 뒤 전국 나머지로 넘어가며 각 단계는 최신월·코드 오름차순이다. 각 pair는 한 번만 반환한다. coverage가 모두 있더라도 stale refresh와 audit은 생길 수 있다.
+
+오프라인 기준표는 `registry/lawd_codes.json`, 출처·hash·count는 `lawd_codes.provenance.json`이다. code.go.kr의 active 10자리 법정동 코드 앞 5자리를 고유화하고 시도 집계 `xx000`은 제외한다. 그 외 시 집계와 세종 36110은 유지한다. 별도 RTMS 사용 검증 없는 추가 제외는 하지 않는다. 폐지·분할 코드의 과거 처리와 RTMS별 지역 의미 검증은 미해결이다. 원본 ZIP/TSV를 로컬에 확보한 뒤 `uv run --locked python -I -B tools/build_lawd_codes.py <raw-file> --output-dir <directory> --download-date 2026-11-12`로 커밋된 기준표를 재생성한다. `--download-date`는 필수 YYYY-MM-DD 실제 다운로드 날짜이며 새 원본에는 그 원본의 날짜를 명시한다. 같은 원본 bytes와 2026-11-12를 주면 커밋된 JSON 두 파일을 byte-for-byte 재생성한다. 다운로드된 raw는 커밋하지 않는다. 재생성은 네트워크를 사용하지 않는다.
 
 ## 실행
 
@@ -353,3 +371,175 @@ error의 data.error_code는 invalid_query/active_snapshot_unverified/query_faile
 검증은 `uv run --locked --extra test --extra mcp python -I -B -m pytest -p no:cacheprovider -q`로
 실행한다. 공식 SDK in-memory/stdio initialize·list·call 테스트이며 실제 채팅 제품 등록/인수나
 실제 HF/API 연결 성공을 의미하지 않는다.
+
+## 누적 릴리스(설계 단계)
+
+**아직 운영 불가(not yet operational).** [ADR-0010](adr/0010-cumulative-batch-releases.md)의
+manifest v2와 shard, 순수 assembly 함수만 제공한다. 기존 CLI/build/publish/activate와
+v1 pipeline은 바뀌지 않았다. 예제 root/shard를 ACTIVE에 복사하거나 기존 publish에
+넣지 않는다. 이 계약 추가는 수집·게시 실행 승인이 아니다.
+
+`examples/cumulative-root.example.json`과 그 `coverage_shards`에 명시된 JSON은
+합성 fixture이며 실제 거래나 게시 근거가 아니다. `validate_manifest`는 root를,
+`resolve_snapshot_inventory(manifest, loader)`는 명시된 hash-bound shard까지 검증한다.
+loader는 고정 revision과 안전한 bounded metadata read를 책임진다. glob 금지,
+16 MiB/metadata file, 1,024 shards, 4,096 entries/shard, 250,000 entries/snapshot
+상한은 ADR의 counting 규칙을 따른다. coverage는 정확한 K 집합이지 곱집합이 아니다.
+zero는 수집 완료이며 미수집 gap과 구분한다. 현재 선택만 조회하고 archive는 기본 조회에서 제외한다.
+
+후속 rollout은 서울 우선·최신 월 우선·두 서비스 공통 기간의 완전 pair만 대상으로 한다.
+서비스당 9,000 requests/day, batch 60 pairs / 변경 512 MiB 이내로 제한할 계획이다.
+수동 smoke 성공 후에만 일일 자동 publish+activate를 도입하고 오류 시 중지한다.
+현재 quota/CLI가 이 신규 정책을 구현했다고 해석하지 않는다. parent 재확인,
+origin 검증, tombstone-after-union, write-once 경로, atomic activation 및
+published-but-not-active 차단을 통합·검증하기 전에는 누적 운영을 시작하지 않는다.
+
+## 누적 수집 job (3b, opt-in)
+
+`plan --config runtime.json` 또는 `collect-batch --config runtime.json --job-id day-20261112 --dry-run`은
+네트워크와 credential 접근 없이 다음 계획·서비스별 보수적 예약량을 표시한다. 일관된
+ledger 읽기를 위해 기존 writer lock을 취하며 opt-in schema 4를 생성한다. 기본 v1 호출은
+schema 2를 유지한다. 이미 schema 3/4인 DB는 downgrade하지 않는다.
+
+실수집은 **운영자 smoke test 전 금지**다. 검증된 누적 v2 ACTIVE와 해당 로컬 snapshot,
+producer 원본 manifest 및 publication ledger가 필요하다. v1 ACTIVE에는 `bootstrap_required`를
+반환한다. legacy bootstrap은 후속 단계다. 실제 API 제공 시작월, city aggregate 의미,
+키·승인·schema·약관을 운영자가 smoke로 확인한 뒤에만 operator-policy.json의
+`accumulation_smoke_verified: true`를 설정한다. 기존 서비스 `max_requests`(3의 배수,
+3~150), terms_reviewed/terms_basis, fixture_evidence가 여전히 필수다.
+
+실행 명령은 `collect-batch --config runtime.json --job-id day-20261112`다. 한 job은 최대
+60 pair의 계획을 고정하고 각 pair 시작 전에 sale/rent **둘 다** runs ledger에 원자적으로
+예약한다. 각 요청 직전 Seoul 날짜를 확인하여 자정에는 두 서비스를 다시 선예약한다.
+미사용 예약은 환급하지 않는다. 서비스별 9,000/day 및 더 작은 operator/provider 한도를
+준수한다. HTTP 429는 이 경로에서 자동 재시도하지 않는다. v1 adapter 기본 동작은 유지한다.
+
+`collect-batch` 종료 코드는 다음과 같다. `0`은 `validated`(로컬 build 완료), `empty`(수집 대상 없음),
+또는 명시적 `--dry-run`의 `planned`만 의미한다. `3`은 `paused`이며 자동화는 같은 job-id로
+재개를 예약해야 한다. `1`은 `blocked`/오류 및 그 밖의 미완료·알 수 없는 상태이고,
+`2`는 설정 오류 또는 CLI 인자 오류다. 성공 코드는 게시나 ACTIVE 전환을 의미하지 않는다.
+각 서비스의 `max_requests`는 생략할 수 없는 정수(3~150, 3의 배수)이며 기본값으로 대체하지 않는다.
+실수집 전에 `terms_basis`가 공백 제거 후 비어 있지 않은 문자열인지 검증한다.
+job-id는 ledger 기록·경로 사용 전에 설정된 모든 secret으로 검사하며 일치하면
+값을 노출하지 않고 `identifier_scan_failed`로 거부한다.
+
+재개는 반드시 같은 job-id를 사용한다. page 중단은 새 attempt/run/observation으로 page 1부터
+시작하며 성공한 sibling은 page hash·schema·행수·정규화 replay·secret scan 후 재사용한다.
+partial을 합치지 않는다. `paused`는 quota/provider 중단이며 다음 날 같은 job을 재개한다.
+`blocked`는 auth/schema/security/verification 또는 partition/batch cap 중단이다. 다른 job-id나
+날짜로 우회할 수 없으며 **운영자 조사 전 DB state를 수정하지 않는다**. 자동 unblock CLI는 없다.
+프로세스 강제 종료로 남은 `.lock`은 자동 탈취하지 않는다. 운영자는 해당 writer가 종료했음을
+확인하고 백업·원인 조사 후에만 lock을 제거한다. URL/키/payload/traceback은 출력하지 않는다.
+
+완전 pair만 data_root/accumulation의 write-once observation에서 선택하여 cumulative snapshot을
+만든다. 변경 Parquet 합계 512 MiB를 넘으면 게시 후보를 만들지 않고 중지한다(자동 분할 없음).
+로컬 원시 XML은 보존하되 snapshot에는 포함하지 않는다. 결과 `validated`는 로컬 build 완료일
+뿐 publication/ACTIVE 전환이 아니다. 결과는 snapshots/<job-id> 및 manifests/<job-id>.json에 있다.
+**기존 v1 publish에 넣지 않는다.** Step 4는 job built→게시 완료 lifecycle, 게시 직전 parent 재검사와
+publication ledger 전이를 통합해야 한다. 그 전에는 built job이 새 job 시작을 차단한다.
+중간 materialization 디렉터리가 불완전하면 재개가 fail-closed되므로 운영자 복구가 필요하다.
+
+runtime config `exclude_parent_city_aggregates`는 기본 true다. committed LAWD 표에서 끝자리 0인
+시 이름과 같은 앞 4자리·시 이름 prefix를 가진 하위 구가 존재하면 시 집계만 제외한다
+(41110 제외, 41111/41113 유지; 36110 유지). false로 전체 active 표를 쓸 수 있다.
+**잠정 RTMS 정책이며 operator smoke 대기 중**이다. 원본 표·provenance는 수정하지 않고 두 파일
+digest, 이 flag, policy digest, parser version 및 plan digest를 job에 결속한다.
+
+## Cumulative ACTIVE query and coverage (step 5)
+
+Install the optional server with `uv sync --locked --extra test --extra mcp`.
+`kapa-runtime-mcp` exposes three read-only, credential-free tools:
+`list_data_capabilities`, `search_transactions`, and `get_data_coverage`.
+No tool collects, publishes, opens arbitrary paths, accepts SQL, or contacts a provider.
+
+For v2 ACTIVE, the publication ledger binds one captured root digest. The reader
+resolves explicit hash-bound coverage shards and current files; retained/archive
+files are never globbed or queried. Every request verifies the entire current
+inventory before and after execution, including unqueried partitions. Selected
+files additionally receive pre/post hash/schema/decoded-row checks. Verification
+also checks data against partition region/month/service/observation metadata.
+This retains full verification I/O; query pruning is not a reduced trust mode.
+
+Example search arguments: `{"filters":{"lawd_code":"11110","contract_date_from":"2025-10-01"},"limit":100}`.
+Coverage arguments: `{"filters":{"service_id":"molit-apartment-sale","lawd_code":"11110"},"limit":100}`.
+Coverage also accepts `contract_date_from/to`. Limits are 1..1000. Follow
+`next_cursor` until null, using identical filters. Cursors bind root digest,
+query and stable ordering; restart pagination after activation or provenance changes.
+
+Coverage pages contain distinct exact service/region/month keys, with separate
+`declared`, `observed`, `zero`, `not_collected` memberships. Never multiply region
+and month lists. Zero means observed with zero transactions, not missing data.
+`gaps_overlapping_query` is page-local for coverage pages; `complete` describes
+the whole filtered declared set. Unstructured manifest gaps remain separately
+reported and cannot safely be assigned to a particular partition.
+For both query tools, `data` contains only `rows` and `total`; metadata appears
+only in the envelope (`coverage.query`, `partition_provenance`, `excluded`,
+`verification`, `limitations`, `warnings`, `next_cursor`). Consumers formerly
+reading these fields under `data` must use their envelope locations.
+Search coverage is a fixed-size pointer to `get_data_coverage`, not inline key sets.
+Search provenance includes only partitions contributing returned rows, capped at
+100 entries; `partition_provenance_summary` reports total contributors, limit and
+truncation. Use coverage pages for complete provenance. Coverage pages retain
+per-partition producer, observation, origin digest and `fetched_at`.
+A valid v2 coverage filter matching no declared or observed key returns `no_data`;
+a declared uncollected key still returns `ok`. Legacy coverage remains `ok` even
+though it has no exact-key row count.
+Staleness is explicitly unknown: no freshness SLA is inferred from collection cadence.
+Inspect timestamps before relying on old observations. Cancellation exclusions,
+snapshot digest, pinned dataset revisions, limitations and `legal_verified=false`
+remain in responses. v1 retains its legacy coverage and query behavior.
+
+Arrow scans use 4096-row batches and one-fragment/one-batch readahead. Count scans
+project only predicate columns; row pages project the response schema. DuckDB
+has a 256 MB working-memory limit and external access disabled. Deep OFFSET sorts
+can fail within that bound rather than silently exhausting memory; narrow the query
+or restart with smaller scope. No process-wide constant-memory claim is made.
+
+Integrity failures at any point, including between initial verification and a
+shard/data read, return `error` with `active_snapshot_unverified`, never
+`invalid_query` or a normal empty result.
+Fail-closed errors require checking the local snapshot and publication evidence;
+never repair a manifest hash by hand or bypass the ledger. This read path does not
+make the separate cumulative publication/bootstrap rollout operational.
+
+## 누적 batch 게시 (step 4)
+
+실제 HF 게시 전 operator smoke가 필수다. 이 구현의 fake-HF 검증은 실행 승인이나
+운영 smoke 완료 증거가 아니다. 기존 `accumulation_smoke_verified` 정책, public market
+명시 설정, reviewed terms, private staging, trusted ACTIVE parent가 필요하다.
+빌드 완료 job만 게시하며 job의 snapshot digest가 없는 이전 실험 job은 재빌드/검토한다.
+
+```sh
+uv run --locked kapa-runtime publish-batch --config runtime.json --job-id batch-id --dry-run
+uv run --locked kapa-runtime publish-batch --config runtime.json --job-id batch-id
+uv run --locked kapa-runtime activate --config runtime.json --release-id batch-id --cumulative
+# local ACTIVE rollback only; does not rewrite public history
+uv run --locked kapa-runtime rollback --config runtime.json --cumulative
+```
+
+Dry-run은 수집/commit/ACTIVE 변경 없이 기존 HF 대상의 전체 inventory를 읽고 검증한다.
+자격증명이 필요하며 staging/public 각각 `bytes`(변경 bytes), `ops`(Add+Delete),
+`files`(전체 결과 파일 수), 그리고 `pairs`를 보고한다. 대상이 없으면 먼저 운영자가
+설정/존재를 확인한다. 60 pairs / 512 MiB changed bytes / 500 operations 중 하나라도
+초과하면 자동 분할하지 않고 중지한다. 검증 전용 cache/SQLite 초기화는 로컬에 남을 수 있다.
+
+게시 순서는 private staging delta → pinned SHA 전체 검증 → public delta → pinned SHA
+전체 검증 → published ledger다. unchanged archive를 다시 Add하지 않지만 전체 bytes를
+계속 검증한다. README의 기본 데이터 목록은 current 선택만 포함한다. 원격 rogue path,
+명시되지 않은 삭제, tombstone 부활, parent/head/visibility 변경을 허용하지 않는다.
+
+종료 코드는 0=게시 성공/정상 dry-run, 1=검증·보안·복구·게시 실패,
+2=설정/CLI 입력 오류다. `collect-batch`의 quota pause 코드 3과 달리 게시 rate limit은
+1로 중지하며 `reason=hub_rate_limited`를 보고한다. commit 429는 최대 3회 시도,
+Retry-After 최대 60초를 그대로 기다린다. 더 긴 지시는 일찍 재시도하지 않고 중지한다.
+
+중단 시 같은 `--job-id`로 재실행한다. 원격 head가 journal의 전체 frozen inventory와
+일치하면 잃어버린 commit 응답을 해결하고 중복 commit하지 않는다. 불일치/손상은
+운영자 개입이 필요하며 새 job으로 우회하지 않는다. 검증 실패 후 public 복원은
+restore-only authority와 frozen spool bytes만 사용한다. 복원 실패의 journal을 삭제하거나
+head를 임의로 변경하지 않는다. spool은 state DB 옆 `publication-spool`에 있으며
+복구 완료 전 GC 금지; 현재 자동 GC 자체가 없다. credential/raw/log 파일은 게시하지 않는다.
+
+Operator smoke는 최소 A→B 게시/활성화→C 재관측/게시/활성화→B local rollback,
+각 commit operation 수, 전체 inventory 검증, private staging 실제 visibility 및
+기본 HF config의 archive 중복 배제를 확인한다. 공개 current rollback은 별도 절차다.
