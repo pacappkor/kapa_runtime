@@ -44,7 +44,7 @@ def setup(tmp_path, monkeypatch):
     with StateStore(settings.state_db) as store:
         store._connection.execute('INSERT INTO releases VALUES (?,?,?,?)', ('A', 'active', json.dumps([
             {'state': 'published', 'evidence': {'commit_reread': True, 'published_manifest_sha256': manifest_digest(parent)}}]), NOW.isoformat()))
-    policy = {'accumulation_smoke_verified': True, 'services': {s: {'max_requests': 3, 'terms_reviewed': True, 'terms_basis': 'fixture'} for s in a.SERVICES},
+    policy = {'accumulation_smoke_verified': True, 'services': {s: {'max_requests': 3, 'terms_reviewed': True, 'terms_basis': 'Catalog permission: free redistribution (https://www.data.go.kr/catalog/15126469/openapi.json); reviewed_at=2026-11-10'} for s in a.SERVICES},
               'fixture_evidence': {'passed': True, 'github_revision': 'a' * 40}}
     (settings.data_root / 'operator-policy.json').write_text(json.dumps(policy))
     monkeypatch.setattr(a.p, '_loaded_secrets', lambda settings: [Secret('test-only-secret')])

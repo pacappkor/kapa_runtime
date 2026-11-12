@@ -12,9 +12,17 @@ from .. import pipeline as p, accumulation as a
 from ..storage.metadata import read_json
 from ..storage.state import StateStore, _dump
 from .activate import _atomic_write
-from .manifest import build_manifest, dumps_manifest, manifest_digest, validate_manifest
+from .manifest import ManifestError, build_manifest, dumps_manifest, manifest_digest, validate_manifest
 from .manifest_v2 import coverage_for_partitions, key
 from .snapshot import check_parent, materialize, published_digest
+from .spool import Spool
+
+
+def _frozen_inputs(settings, data):
+    if 'inputs_blob' not in data:  # Resume pre-spool, URL-free jobs too.
+        return data
+    frozen = Spool(settings.state_db.parent / 'publication-spool').read_document(data['inputs_blob'])
+    return {**data, **frozen}
 
 
 def legacy_partitions(settings, store, release_id):
@@ -93,6 +101,7 @@ def _prepare_snapshot(settings, store, release_id, data):
     Interrupted temp directories may be removed by an operator with writers stopped.
     Only a verified, atomically renamed directory becomes the snapshot.
     """
+    data = _frozen_inputs(settings, data)
     m = validate_manifest(data['manifest'])
     p._require(manifest_digest(m) == data['snapshot_digest']
                and a.digest(dict(manifest=m, card=data['card'], imports=data['imports']))
@@ -120,6 +129,24 @@ def _prepare_snapshot(settings, store, release_id, data):
 
 
 def bootstrap_cumulative(settings, *, release_id, import_release=None, dry_run=False, api=None):
+    try:
+        return _bootstrap_cumulative(settings, release_id=release_id, import_release=import_release,
+                                     dry_run=dry_run, api=api)
+    except p.workspace_guard.WorkspaceError as exc:
+        # WorkspaceError carries internal codes, never arbitrary exception text.
+        code = str(exc)
+        allowed = {'workspace_dependency_mismatch', 'workspace_revision_unavailable',
+                   'workspace_repository_untrusted_owner', 'workspace_repository_unsafe_config',
+                   'workspace_repository_submodules_unsupported', 'workspace_repository_dirty',
+                   'workspace_required_repository_unavailable', 'workspace_revision_mismatch'}
+        raise p.PipelineError(code if code in allowed else 'workspace_revision_unavailable') from None
+    except ManifestError:
+        raise p.PipelineError('bootstrap_manifest_invalid') from None
+    except OSError:
+        raise p.PipelineError('bootstrap_storage_failed') from None
+
+
+def _bootstrap_cumulative(settings, *, release_id, import_release=None, dry_run=False, api=None):
     from .batch import publish_batch
     invoked_at = datetime.now(timezone.utc)
     p._id(release_id)
@@ -135,6 +162,7 @@ def bootstrap_cumulative(settings, *, release_id, import_release=None, dry_run=F
             data = json.loads(existing[0])
             p._require(data.get('kind') == 'bootstrap' and data['explicit_imports'] == imports,
                        'bootstrap_job_conflict')
+            _frozen_inputs(settings, data)  # Verify frozen bytes on every retry, even built jobs.
             prepared = None
             if existing[1] == 'preparing':
                 p._require(not dry_run, 'bootstrap_preparation_resume_required')
@@ -202,9 +230,13 @@ def bootstrap_cumulative(settings, *, release_id, import_release=None, dry_run=F
                 materialize(m, root, load, enabled=True)
                 prepared = (m, root, data)
             else:
-                data.update(manifest=m, card=card.decode(), created_at=m['created_at'])
-                data['inputs_digest'] = a.digest(dict(manifest=m, card=data['card'], imports=origins))
-                # SQLite autocommit makes the frozen intent durable before any mkdir.
+                frozen = dict(manifest=m, card=card.decode())
+                data['created_at'] = m['created_at']
+                data['inputs_digest'] = a.digest(dict(**frozen, imports=origins))
+                # Blob bytes are fsynced first; an orphan blob is harmless. Only
+                # after durable SQLite intent may snapshot preparation mkdir.
+                data['inputs_blob'] = Spool(settings.state_db.parent / 'publication-spool').put_document(frozen)
+                # SQLite autocommit makes the frozen intent durable before any snapshot mkdir.
                 store._connection.execute('INSERT INTO collection_jobs VALUES (?,?,?)',
                                           (release_id, 'preparing', _dump(data)))
                 _prepare_snapshot(settings, store, release_id, data)

@@ -19,7 +19,10 @@ from ..models import ReleaseState
 
 
 def _save(store, job, data):
-    body = _dump(data)
+    # Manifests contain reviewed documentation URLs, not ledger-safe metadata.
+    # Freeze the complete journal atomically before replacing its ledger pointer.
+    descriptor = Spool(store.path.parent / 'publication-spool').put_document(data)
+    body = _dump({'document_blob': descriptor})
     store._connection.execute('INSERT OR REPLACE INTO batch_publications VALUES (?,?,?)',
                               (job, body, hashlib.sha256(body.encode()).hexdigest()))
 
@@ -30,7 +33,10 @@ def _load(store, job):
         return None
     if hashlib.sha256(row[0].encode()).hexdigest() != row[1]:
         raise PublishError('Publication journal corrupt')
-    return json.loads(row[0])
+    data = json.loads(row[0])
+    if 'document_blob' in data:
+        return Spool(store.path.parent / 'publication-spool').read_document(data['document_blob'])
+    return data  # Pre-spool, URL-free journals remain resumable.
 
 
 def _retry_after(exc):

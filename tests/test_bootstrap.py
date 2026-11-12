@@ -252,7 +252,8 @@ def test_preparation_crash_resume(legacy, monkeypatch, boundary):
     with StateStore(settings.state_db) as store:
         state, raw = store._connection.execute(
             "SELECT state,data FROM collection_jobs WHERE job_id='boot'").fetchone()
-    data = json.loads(raw)
+    data = b._frozen_inputs(settings, json.loads(raw))
+    assert 'https://' not in raw
     assert state == ('built' if boundary == 'built' else 'preparing')
     # Simulate an unclean process exit leaving an unrelated partial temp tree.
     leftover = settings.snapshots_dir / 'bootstrap-preparing-abandoned'
@@ -264,6 +265,42 @@ def test_preparation_crash_resume(legacy, monkeypatch, boundary):
     assert final['selected_partitions'] == data['manifest']['selected_partitions']
     assert (leftover / 'partial').read_bytes() == b'untrusted'
     assert len(api.commits) == 4
+
+
+def test_frozen_bootstrap_blob_corruption_refused(legacy, monkeypatch):
+    from kapa_runtime.releases import bootstrap as b
+    from kapa_runtime.releases.hf import PublishError
+    settings, api = legacy
+    with monkeypatch.context() as patch:
+        def crash(*args):
+            raise KeyboardInterrupt()
+        patch.setattr(b, '_prepare_snapshot', crash)
+        with pytest.raises(KeyboardInterrupt):
+            bootstrap_cumulative(settings, release_id='boot', api=api)
+    with StateStore(settings.state_db) as store:
+        raw = store._connection.execute(
+            "SELECT data FROM collection_jobs WHERE job_id='boot'").fetchone()[0]
+    descriptor = json.loads(raw)['inputs_blob']
+    blob = settings.state_db.parent / 'publication-spool' / descriptor['sha256']
+    payload = blob.read_bytes()
+    blob.write_bytes(b' ' + payload[1:])  # Same size, different digest.
+    with pytest.raises(PublishError, match='digest'):
+        bootstrap_cumulative(settings, release_id='boot', api=api)
+    assert not (settings.snapshots_dir / 'boot').exists()
+    assert len(api.commits) == 2
+
+
+@pytest.mark.parametrize('code', ['workspace_dependency_mismatch', 'arbitrary sensitive text'])
+def test_bootstrap_workspace_error_codes(legacy, monkeypatch, code):
+    settings, api = legacy
+    def fail(settings):
+        raise p.workspace_guard.WorkspaceError(code)
+    monkeypatch.setattr(p.workspace_guard, 'capture', fail)
+    with pytest.raises(p.PipelineError) as error:
+        bootstrap_cumulative(settings, release_id='boot', api=api)
+    expected = code if code == 'workspace_dependency_mismatch' else 'workspace_revision_unavailable'
+    assert error.value.error_code == expected
+    assert len(api.commits) == 2
 
 
 @pytest.mark.parametrize('state', ['quarantined', 'failed', 'collected', 'validated'])

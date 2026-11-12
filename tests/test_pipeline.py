@@ -37,7 +37,7 @@ def settings(tmp_path, monkeypatch):
     result = RuntimeSettings.load(config)
     result.data_root.mkdir()
     (result.data_root / "operator-policy.json").write_text(json.dumps({
-        "services": {s: {"max_requests": 3, "terms_reviewed": True, "terms_basis": "synthetic fixture permission; reviewed_at=2026-11-10"} for s in p.SERVICES},
+        "services": {s: {"max_requests": 3, "terms_reviewed": True, "terms_basis": "Catalog permission: free redistribution (https://www.data.go.kr/catalog/15126469/openapi.json); reviewed_at=2026-11-10"} for s in p.SERVICES},
         "fixture_evidence": {"github_revision": SHA, "passed": True}}))
     monkeypatch.setattr(p, "_git_revision", lambda settings: SHA)
     return result
