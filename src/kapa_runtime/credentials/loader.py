@@ -92,7 +92,8 @@ def _effective_alias(alias: str, settings: RuntimeSettings, env: Mapping[str, st
     # Defined-but-empty role credentials must fail closed. Only legacy fallback
     # is allowed: a new write token must never become the default read token.
     if (alias in ("hugging_face_write", "hugging_face_read")
-            and ENV_NAMES[alias] not in env and alias not in settings.credential_files):
+            and settings.credential_env.get(alias, ENV_NAMES[alias]) not in env
+            and alias not in settings.credential_env and alias not in settings.credential_files):
         return "hugging_face"
     return alias
 
@@ -101,7 +102,7 @@ def load_secret(alias: str, settings: RuntimeSettings, env: Mapping[str, str] = 
     if alias not in ENV_NAMES:
         raise CredentialError("unknown_alias")
     alias = _effective_alias(alias, settings, env)
-    name = ENV_NAMES[alias]
+    name = settings.credential_env.get(alias, ENV_NAMES[alias])
     if name in env:
         value, error = _parse(env[name])
     elif alias in settings.credential_files:
@@ -117,7 +118,7 @@ def load_secret(alias: str, settings: RuntimeSettings, env: Mapping[str, str] = 
 
 def diagnose(alias: str, settings: RuntimeSettings, env: Mapping[str, str] = os.environ) -> dict:
     effective = _effective_alias(alias, settings, env)
-    name = ENV_NAMES.get(effective)
+    name = settings.credential_env.get(effective, ENV_NAMES.get(effective))
     source = "env" if name in env else "file" if effective in settings.credential_files else "missing"
     code = None
     try:

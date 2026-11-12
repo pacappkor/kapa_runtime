@@ -563,6 +563,14 @@ def _freeze(settings, store, job, data, parent, resolved, parent_root, secrets, 
     scan_secret_payload(json.dumps(manifest, default=str).encode(), "release.json", secrets)
     for name, payload in shard_payloads.items():
         scan_secret_payload(payload, name, secrets)
+    # Persist generated resume metadata, never the derived snapshot tree.
+    frozen = settings.data_root / "accumulation" / "frozen" / job
+    from .releases.activate import _atomic_write
+    for name, payload in {"README.md": card_payload, **shard_payloads}.items():
+        target = frozen / relative_path(name)
+        _safe_path(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(target, payload)
     new_paths = {f["path"] for part in parts for f in part["files"]}
     destination = settings.snapshots_dir / job
     def load(name):

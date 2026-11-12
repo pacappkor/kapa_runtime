@@ -111,7 +111,7 @@ def _secret_aliases(settings, *, hf=False, read_only=False):
     # Keep diagnostics and publication aligned, including unused credentials
     # that must still be loaded for secret scanning.
     from .credentials.loader import ENV_NAMES
-    aliases = {"data_go_kr"} | set(settings.credential_files)
+    aliases = {"data_go_kr"} | set(settings.credential_files) | set(settings.credential_env)
     aliases.update(alias for alias, name in ENV_NAMES.items() if name in os.environ)
     if hf:
         aliases.add("hugging_face_read")

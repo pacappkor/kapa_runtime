@@ -37,7 +37,18 @@ class RuntimeSettings:
 
     exclude_parent_city_aggregates: bool = True
 
+    credential_env: dict[str, str] = field(default_factory=dict)
+
     def __post_init__(self):
+        import re
+        aliases = {"data_go_kr", "hugging_face", "hugging_face_write", "hugging_face_read", "rone", "vworld"}
+        if (not isinstance(self.credential_env, dict) or set(self.credential_env) - aliases
+                or any(not isinstance(v, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", v)
+                       for v in self.credential_env.values())
+                or self.credential_env and self.credential_files):
+            raise ConfigurationError("invalid or mixed credential sources")
+        if self.hf_visibilities.get("state", "private") != "private":
+            raise ConfigurationError("state repository must be private")
         if type(self.exclude_parent_city_aggregates) is not bool:
             raise ConfigurationError("invalid city aggregate policy")
         if (not isinstance(self.trusted_repo_owners, (list, tuple))
@@ -127,7 +138,7 @@ class RuntimeSettings:
                        raw.get("sibling_repos", cls.__dataclass_fields__["sibling_repos"].default),
                        raw.get("required_repos", cls.__dataclass_fields__["required_repos"].default),
                        raw.get("trusted_repo_owners", ()),
-                       raw.get("exclude_parent_city_aggregates", True))
+                       raw.get("exclude_parent_city_aggregates", True), raw.get("credential_env", {}))
         except (OSError, ValueError, TypeError, KeyError, AttributeError):
             raise ConfigurationError("unable to load valid runtime configuration") from None
 

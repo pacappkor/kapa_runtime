@@ -667,3 +667,12 @@ unexpected pairs, row/zero anomalies, archive duplication or backup failure.
 Monitor per-service reservations, disk/spool growth, commit operations, selected
 coverage, oldest timestamps and refresh SLA shortfalls. Never delete spool/journals
 to clear stops. No scheduled task is registered by this implementation.
+
+## Unattended daily accumulation on GitHub Actions
+
+See [Unattended accumulation setup and recovery](UNATTENDED.md) for the protected
+`collector` environment, required secrets, private HF state repository creation,
+one-time `state push --initial` migration, supervised main-only dispatch,
+retirement of local scheduling, bundle limits/CAS, and explicit STOP clearing.
+The ACTIVE v2 bootstrap and Smoke gate above remain mandatory; scheduling does
+not grant collection approval or change reviewed scope.
